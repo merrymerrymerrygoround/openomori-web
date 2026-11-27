@@ -166,7 +166,16 @@ index f8d1a89..7915c1c 100644
  
  export interface DisplayOptions {
      /** Max internal render multiplier (1..4). `?q=` in the URL overrides it. */
-@@ -126,40 +124,22 @@ export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): voi
+@@ -23,7 +22,7 @@
+  * Live display preferences, changed by the settings screen. The URL (`?q=`, `?wide=0`) still wins, so tests and
+  * bookmarks behave exactly as before. `quality` 0 means "automatic" (up to the default max).
+  */
+-export const displayPrefs = { quality: 0, wide: true, smooth: true };
++export const displayPrefs = { quality: 0, wide: false, smooth: true };
+ 
+ export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): void {
+     const G = Graphics;
+@@ -126,40 +125,22 @@
      };
  
      // ---- bar colour ----------------------------------------------------------------------
@@ -176,14 +185,7 @@ index f8d1a89..7915c1c 100644
      bars.forEach(el => Object.assign(el.style, { position: 'fixed', zIndex: '0', pointerEvents: 'none' }));
      document.body.prepend(...bars);
      document.body.style.background = '#000';
-+    document.documentElement.style.setProperty('background-color', '#000', 'important');
-+    document.documentElement.style.setProperty('min-height', '100%', 'important');
-+    document.body.style.setProperty('background-color', '#000', 'important');
-+    document.body.style.setProperty('margin', '0', 'important');
-+    document.body.style.setProperty('min-height', '100vh', 'important');
-+    document.body.style.setProperty('min-height', '100dvh', 'important');
-+    document.body.style.setProperty('overflow', 'hidden', 'important');
- 
+-
 -    const mkProbe = (w: number, h: number) => {
 -        const c = document.createElement('canvas');
 -        c.width = w; c.height = h;
@@ -205,7 +207,14 @@ index f8d1a89..7915c1c 100644
 -        const d = ctx.getImageData(0, 0, vertical ? 1 : STEPS, vertical ? STEPS : 1).data;
 -        return Array.from({ length: STEPS }, (_, i) => `rgb(${d[i * 4]},${d[i * 4 + 1]},${d[i * 4 + 2]})`);
 -    }
--
++    document.documentElement.style.setProperty('background-color', '#000', 'important');
++    document.documentElement.style.setProperty('min-height', '100%', 'important');
++    document.body.style.setProperty('background-color', '#000', 'important');
++    document.body.style.setProperty('margin', '0', 'important');
++    document.body.style.setProperty('min-height', '100vh', 'important');
++    document.body.style.setProperty('min-height', '100dvh', 'important');
++    document.body.style.setProperty('overflow', 'hidden', 'important');
+ 
      const place = (el: HTMLElement, x: number, y: number, w: number, h: number) =>
          Object.assign(el.style, { left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px` });
  
@@ -214,7 +223,7 @@ index f8d1a89..7915c1c 100644
          const horizontal = innerWidth / innerHeight >= G._width / G._height; // bars left/right vs top/bottom
          const cw = G._width * G._realScale, ch = G._height * G._realScale;
          const gx = (innerWidth - cw) / 2, gy = (innerHeight - ch) / 2;       // the bars are what's outside the canvas
-@@ -167,13 +116,11 @@ export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): voi
+@@ -167,13 +148,11 @@
          if (horizontal) {
              place(first, 0, 0, Math.ceil(gx) + 1, innerHeight);
              place(second, Math.floor(gx + cw) - 1, 0, innerWidth - Math.floor(gx + cw) + 1, innerHeight);
@@ -230,13 +239,6 @@ index f8d1a89..7915c1c 100644
          }
      }
  
-@@ -20,5 +20,5 @@ export interface DisplayOptions {
-  */
--export const displayPrefs = { quality: 0, wide: true, smooth: true };
-+export const displayPrefs = { quality: 0, wide: false, smooth: true };
- export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): void {
-     const G = Graphics;
-     const query = new URLSearchParams(location.search);
 diff --git a/src/client/entry.ts b/src/client/entry.ts
 index 95ea58c..9ac58a9 100644
 --- a/src/client/entry.ts
