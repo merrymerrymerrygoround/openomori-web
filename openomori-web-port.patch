@@ -31,16 +31,47 @@ index df9e662..f0e8bb3 100644
 +    }
 +    console.log(`built dist/${name}.js (${(w.outputs[0]!.size / 1024).toFixed(0)} KB)`);
 +}
+diff --git a/examples/newgame-plus/scripts/main.js b/examples/newgame-plus/scripts/main.js
+index b5bb03d..9a87805 100644
+--- a/examples/newgame-plus/scripts/main.js
++++ b/examples/newgame-plus/scripts/main.js
+@@ -53,8 +53,6 @@
+ 
+   async function start() {
+     if (!ensureSource()) { mod.warn('New Game+ needs a running game or at least one save to carry progress from.'); return false; }
+-    // Safety net: a checkpoint of the game being left, restorable from the debug panel (F9 > checkpoints).
+-    try { await OmoriMod.checkpoints.capture('before New Game+'); } catch (e) { mod.error(e, 'could not save a checkpoint first (continuing)'); }
+     const carried = capture();
+     DataManager.setupNewGame();
+     apply(carried);
+@@ -63,7 +61,7 @@
+     return true;
+   }
+ 
+-  mod.settings.add({ id: 'start', type: 'action', label: 'New Game+', button: 'Start New Game+', help: 'Starts the story again from the beginning with the options above. A checkpoint of the current game is saved first.', run: () => { void start(); } });
++  mod.settings.add({ id: 'start', type: 'action', label: 'New Game+', button: 'Start New Game+', help: 'Starts the story again from the beginning with the options above. The most recent save is used as the source of carried-over progress.', run: () => { void start(); } });
+   mod.command('ngplus.start', () => { void start(); });
+ 
+   // For other mods and tests: NewGamePlus.start(), NewGamePlus.cycle(), NewGamePlus.options.<name>.get()/set()
 diff --git a/package.json b/package.json
-index ef922b9..2840d2d 100644
+index ef922b9..9b87c2d 100644
 --- a/package.json
 +++ b/package.json
+@@ -1,7 +1,7 @@
+ {
+   "name": "openomori",
+   "version": "0.1.0",
+-  "description": "A modern runtime and modding toolkit for OMORI: runs your own copy in the browser, with a mod loader, a map and event compiler, checkpoints and story-route tools. No game files included.",
++  "description": "A modern runtime and modding toolkit for OMORI: runs your own copy in the browser, with a mod loader, a map and event compiler, story-route analysis tools. No game files included.",
+   "license": "MIT",
+   "homepage": "https://github.com/dazacode/openomori#readme",
+   "repository": {
 @@ -35,7 +35,7 @@
      "start": "bun run build.ts && bun run src/server.ts",
      "dev": "bun run build.ts --dev && bun --watch run src/server.ts",
      "typecheck": "tsc --noEmit",
 -    "test": "bun run build.ts && bun run mod map build story-demo && bun run mod map build edit-demo && bun test src && bun run test/smoke.ts && bun run test/debug-panel.ts && bun run test/checkpoints.ts && bun run test/story-demo.ts && bun run test/newgame-plus.ts && bun run test/cutscene.ts && bun run test/mods.ts && bun run test/settings.ts",
-+    "test": "bun run build.ts && bun run mod map build story-demo && bun run mod map build edit-demo && bun test src && bun run test/smoke.ts && bun run test/debug-panel.ts && bun run test/checkpoints.ts && bun run test/story-demo.ts && bun run test/newgame-plus.ts && bun run test/cutscene.ts && bun run test/settings.ts",
++    "test": "bun run build.ts && bun run mod map build story-demo && bun run mod map build edit-demo && bun test src && bun run test/smoke.ts && bun run test/debug-panel.ts && bun run test/story-demo.ts && bun run test/newgame-plus.ts && bun run test/cutscene.ts && bun run test/settings.ts",
      "mod": "bun run src/cli.ts"
    },
    "dependencies": {
@@ -68,12 +99,14 @@ index f858c27..0802bd6 100644
  </body>
  </html>
 diff --git a/src/client/boot.ts b/src/client/boot.ts
-index fe97c0b..a169219 100644
+index fe97c0b..e42c4af 100644
 --- a/src/client/boot.ts
 +++ b/src/client/boot.ts
-@@ -3,12 +3,7 @@ import { installCutsceneLayout } from './cutscene.ts';
+@@ -1,14 +1,10 @@
+ // Loads the stock game scripts in order, then starts the game (what js/main.js does on window.onload).
+ import { installCutsceneLayout } from './cutscene.ts';
 -import { installBeatRecorder, installCheckpointApi } from './checkpoints.ts';
--import { installDebug } from './debug.ts';
+ import { installDebug } from './debug.ts';
  import { installDisplay } from './display.ts';
 -import { installGameEvents, installErrorCapture } from './mods/api.ts';
 -import { initMods, patchPlugins, runPhase } from './mods/runtime.ts';
@@ -85,7 +118,7 @@ index fe97c0b..a169219 100644
  
  const LIBS = ['pixi', 'pixi-tilemap', 'pixi-picture', 'lz-string', 'iphone-inline-video.browser'].map(n => `js/libs/${n}.js`);
  const CORE = ['rpg_core', 'rpg_managers', 'rpg_objects', 'rpg_scenes', 'rpg_sprites', 'rpg_windows', 'plugins'].map(n => `js/${n}.js`);
-@@ -36,42 +33,16 @@ async function warmCache(): Promise<void> {
+@@ -36,42 +32,17 @@ async function warmCache(): Promise<void> {
  
  export async function boot(): Promise<void> {
      const mark = (n: string) => performance.mark(`omori:${n}`);
@@ -109,7 +142,7 @@ index fe97c0b..a169219 100644
 -    await runPhase('post-plugins');  // mod scripts: the game's classes exist, nothing has started
      installDisplay();                // must run after plugins so it wins over YEP_CoreEngine
      installCutsceneLayout();
--    installDebug();
+     installDebug();
 -    installSettings();               // replaces the game's options screens; after plugins so ConfigManager is final
 +    if (new URLSearchParams(location.search).get('newsettings') === '1') installSettings();
      SceneManager.run(Scene_Boot);
@@ -130,6 +163,624 @@ index fe97c0b..a169219 100644
 -        } catch { /* server restarting */ }
 -    }, 1000);
  }
+diff --git a/src/client/checkpoint-core.test.ts b/src/client/checkpoint-core.test.ts
+deleted file mode 100644
+index feb6300..0000000
+--- a/src/client/checkpoint-core.test.ts
++++ /dev/null
+@@ -1,37 +0,0 @@
+-import { describe, expect, test } from 'bun:test';
+-import { describeChange, diffDigests, makeDigest, type GameLike } from './checkpoint-core.ts';
+-
+-const game = (over: Partial<GameLike> = {}): GameLike => ({
+-    $gameSwitches: { _data: [undefined, true, false, true] },
+-    $gameVariables: { _data: [undefined, 0, 5, 'x'] },
+-    $gameSelfSwitches: { _data: { '3,4,A': true, '3,5,A': false } },
+-    $gameParty: { _gold: 10, _items: { 1: 2, 2: 0 }, _actors: [1, 2] },
+-    $gameActors: { _data: [null, { _level: 3 }] },
+-    $gameMap: { _mapId: 7 }, $gamePlayer: { _x: 1, _y: 2 },
+-    ...over,
+-});
+-
+-describe('checkpoint digest', () => {
+-    test('is sparse and tolerates a half-started game', () => {
+-        const d = makeDigest(game());
+-        expect(d.switches).toEqual([1, 3]);
+-        expect(d.variables).toEqual({ 2: 5, 3: 'x' });
+-        expect(d.selfSwitches).toEqual({ '3,4,A': true });
+-        expect(d.items).toEqual({ 1: 2 });
+-        expect(d.levels).toEqual({ 1: 3 });
+-        expect(() => makeDigest({})).not.toThrow();
+-    });
+-    test('diff finds exactly the changes', () => {
+-        const a = makeDigest(game());
+-        const b = makeDigest(game({
+-            $gameSwitches: { _data: [undefined, true, true] },
+-            $gameParty: { _gold: 15, _items: { 1: 2, 4: 1 }, _actors: [1] },
+-        }));
+-        const lines = diffDigests(a, b).map(c => describeChange(c, { switches: ['', 'A', 'Door open'] }));
+-        expect(lines).toContain('switch 2 Door open: ON');
+-        expect(lines).toContain('switch 3: off');
+-        expect(lines).toContain('gold: 10 -> 15');
+-        expect(lines).toContain('item 4: none -> 1');
+-        expect(diffDigests(a, a)).toEqual([]);
+-    });
+-});
+diff --git a/src/client/checkpoint-core.ts b/src/client/checkpoint-core.ts
+deleted file mode 100644
+index 4a1f11a..0000000
+--- a/src/client/checkpoint-core.ts
++++ /dev/null
+@@ -1,111 +0,0 @@
+-// Pure, game-free half of the checkpoint system: a readable "digest" of story state and the diff between two
+-// digests. Kept free of browser/game globals so it can be unit-tested with `bun test`.
+-
+-export interface Digest {
+-    switches: number[];                         // ids that are ON
+-    variables: Record<number, unknown>;         // non-zero / non-empty only
+-    selfSwitches: Record<string, boolean>;      // "mapId,eventId,A" -> true
+-    selfVariables: Record<string, unknown>;
+-    gold: number;
+-    items: Record<number, number>;
+-    weapons: Record<number, number>;
+-    armors: Record<number, number>;
+-    party: number[];                            // actor ids, in order
+-    levels: Record<number, number>;
+-    map: { id: number; x: number; y: number };
+-}
+-
+-export interface Change { section: string; key: string; from: unknown; to: unknown }
+-
+-const empty = (v: unknown) => v === undefined || v === null || v === 0 || v === '' || v === false;
+-
+-const sparse = (data: unknown): Record<string, unknown> => {
+-    const out: Record<string, unknown> = {};
+-    if (Array.isArray(data)) data.forEach((v, i) => { if (!empty(v)) out[i] = v; });
+-    else if (data && typeof data === 'object') for (const [k, v] of Object.entries(data)) if (!empty(v)) out[k] = v;
+-    return out;
+-};
+-const counts = (o: unknown): Record<number, number> => {
+-    const out: Record<number, number> = {};
+-    for (const [k, v] of Object.entries((o ?? {}) as Record<string, number>)) if (v) out[Number(k)] = v;
+-    return out;
+-};
+-
+-/** Minimal structural view of the game objects a digest reads (all optional: a half-started game must not throw). */
+-export interface GameLike {
+-    $gameSwitches?: { _data?: unknown };
+-    $gameVariables?: { _data?: unknown };
+-    $gameSelfSwitches?: { _data?: unknown };
+-    $gameSelfVariables?: { _data?: unknown };
+-    $gameParty?: { _gold?: number; _items?: unknown; _weapons?: unknown; _armors?: unknown; _actors?: number[] };
+-    $gameActors?: { _data?: ({ _level?: number } | null | undefined)[] };
+-    $gameMap?: { _mapId?: number };
+-    $gamePlayer?: { _x?: number; _y?: number };
+-}
+-
+-export function makeDigest(g: GameLike): Digest {
+-    const levels: Record<number, number> = {};
+-    (g.$gameActors?._data ?? []).forEach((a, i) => { if (a && typeof a._level === 'number') levels[i] = a._level; });
+-    return {
+-        switches: Object.keys(sparse(g.$gameSwitches?._data)).map(Number),
+-        variables: Object.fromEntries(Object.entries(sparse(g.$gameVariables?._data)).map(([k, v]) => [Number(k), v])),
+-        selfSwitches: sparse(g.$gameSelfSwitches?._data) as Record<string, boolean>,
+-        selfVariables: sparse(g.$gameSelfVariables?._data),
+-        gold: g.$gameParty?._gold ?? 0,
+-        items: counts(g.$gameParty?._items),
+-        weapons: counts(g.$gameParty?._weapons),
+-        armors: counts(g.$gameParty?._armors),
+-        party: [...(g.$gameParty?._actors ?? [])],
+-        levels,
+-        map: { id: g.$gameMap?._mapId ?? 0, x: g.$gamePlayer?._x ?? 0, y: g.$gamePlayer?._y ?? 0 },
+-    };
+-}
+-
+-const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+-
+-function diffRecord(section: string, a: Record<string, unknown>, b: Record<string, unknown>, out: Change[]) {
+-    for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+-        if (!same(a[k], b[k])) out.push({ section, key: k, from: a[k] ?? null, to: b[k] ?? null });
+-    }
+-}
+-
+-/** Everything that differs going from `a` to `b`. */
+-export function diffDigests(a: Digest, b: Digest): Change[] {
+-    const out: Change[] = [];
+-    const A = new Set(a.switches), B = new Set(b.switches);
+-    for (const id of new Set([...A, ...B])) if (A.has(id) !== B.has(id)) out.push({ section: 'switch', key: String(id), from: A.has(id), to: B.has(id) });
+-    diffRecord('variable', a.variables, b.variables, out);
+-    diffRecord('selfSwitch', a.selfSwitches, b.selfSwitches, out);
+-    diffRecord('selfVariable', a.selfVariables, b.selfVariables, out);
+-    diffRecord('item', a.items, b.items, out);
+-    diffRecord('weapon', a.weapons, b.weapons, out);
+-    diffRecord('armor', a.armors, b.armors, out);
+-    diffRecord('level', a.levels, b.levels, out);
+-    if (a.gold !== b.gold) out.push({ section: 'gold', key: '', from: a.gold, to: b.gold });
+-    if (!same(a.party, b.party)) out.push({ section: 'party', key: '', from: a.party, to: b.party });
+-    if (!same(a.map, b.map)) out.push({ section: 'location', key: '', from: a.map, to: b.map });
+-    return out;
+-}
+-
+-export interface Names {
+-    switches?: (string | null)[]; variables?: (string | null)[];
+-    items?: ({ name?: string } | null)[]; weapons?: ({ name?: string } | null)[]; armors?: ({ name?: string } | null)[];
+-}
+-
+-/** One human line per change, using database names when available. */
+-export function describeChange(c: Change, n: Names = {}): string {
+-    const nm = (list: readonly unknown[] | undefined, id: string) => {
+-        const e = list?.[Number(id)];
+-        const s = typeof e === 'string' ? e : (e as { name?: string } | null | undefined)?.name;
+-        return s ? ` ${s}` : '';
+-    };
+-    const v = (x: unknown) => (x === null || x === undefined ? 'none' : typeof x === 'object' ? JSON.stringify(x) : String(x));
+-    switch (c.section) {
+-        case 'switch': return `switch ${c.key}${nm(n.switches, c.key)}: ${c.to ? 'ON' : 'off'}`;
+-        case 'variable': return `variable ${c.key}${nm(n.variables, c.key)}: ${v(c.from)} -> ${v(c.to)}`;
+-        case 'item': return `item ${c.key}${nm(n.items, c.key)}: ${v(c.from)} -> ${v(c.to)}`;
+-        case 'weapon': return `weapon ${c.key}${nm(n.weapons, c.key)}: ${v(c.from)} -> ${v(c.to)}`;
+-        case 'armor': return `armor ${c.key}${nm(n.armors, c.key)}: ${v(c.from)} -> ${v(c.to)}`;
+-        default: return `${c.section}${c.key ? ' ' + c.key : ''}: ${v(c.from)} -> ${v(c.to)}`;
+-    }
+-}
+diff --git a/src/client/checkpoints.ts b/src/client/checkpoints.ts
+deleted file mode 100644
+index dfcf8e3..0000000
+--- a/src/client/checkpoints.ts
++++ /dev/null
+@@ -1,337 +0,0 @@
+-// Checkpoints: named snapshots of the whole running game, stored per profile in IndexedDB.
+-// A checkpoint holds the same data a normal save would (DataManager.makeSaveContents, gzipped), plus a readable digest
+-// used for diffing. Restoring goes through the game's own load path and always takes an "undo" checkpoint first.
+-// Also here: the "story beat" recorder (auto-checkpoints the first time each story switch turns on) and
+-// checkpoints shipped by mods (OmoriMod.checkpoints.register).
+-import { diffDigests, makeDigest, type Change, type Digest } from './checkpoint-core.ts';
+-import { getActiveProfile } from './mods/store.ts';
+-import { portValue, register } from './settings/registry.ts';
+-import type { StoryIndex } from '../mods/storyscan.ts';
+-import { ENDING_FLAGS, PHASE_FLAGS, SPINE_SWITCH, coverage, describe, routeKey, routeLabel, signature } from './story-model.ts';
+-
+-export interface Checkpoint {
+-    id: string;
+-    name: string;
+-    time: number;
+-    digest: Digest;
+-    z?: Uint8Array;         // gzipped JsonEx save contents (current format)
+-    save?: string;          // plain JsonEx string (old checkpoints and imports)
+-    auto?: boolean;         // made by the system (e.g. "before restore")
+-    beat?: boolean;         // recorded automatically at a story beat
+-    forged?: string;        // made by patching another checkpoint: a description of the patch
+-    provided?: string;      // id of the mod that shipped it (read-only, lives in memory)
+-}
+-
+-const STORE = 'checkpoints';
+-const MAX_AUTO = 10;
+-const MAX_BEATS = 200;
+-
+-let dbPromise: Promise<IDBDatabase> | null = null;
+-async function db(): Promise<IDBDatabase> {
+-    if (!dbPromise) {
+-        dbPromise = (async () => {
+-            const p = await getActiveProfile().catch(() => null);
+-            const name = 'omori-checkpoints' + (p && p.id !== 'default' ? ':' + p.id : '');
+-            return new Promise<IDBDatabase>((res, rej) => {
+-                const r = indexedDB.open(name, 1);
+-                r.onupgradeneeded = () => r.result.createObjectStore(STORE, { keyPath: 'id' });
+-                r.onsuccess = () => res(r.result);
+-                r.onerror = () => rej(r.error);
+-            });
+-        })();
+-        dbPromise.catch(() => { dbPromise = null; });
+-    }
+-    return dbPromise;
+-}
+-async function tx<T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<T>): Promise<T> {
+-    const d = await db();
+-    return new Promise((res, rej) => {
+-        const r = fn(d.transaction(STORE, mode).objectStore(STORE));
+-        r.onsuccess = () => res(r.result);
+-        r.onerror = () => rej(r.error);
+-    });
+-}
+-
+-const g = globalThis as any;
+-export const gameRunning = () => !!(g.$gameParty && g.$gamePlayer && g.$gameSwitches && g.$gameMap && g.DataManager);
+-
+-// ------------------------------------------------------------------ compression
+-const gzip = async (text: string): Promise<Uint8Array> => new Uint8Array(await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+-const gunzip = async (b: Uint8Array): Promise<string> => new Response(new Blob([b as BlobPart]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+-const toB64 = (b: Uint8Array) => { let s = ''; for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode(...b.subarray(i, i + 0x8000)); return btoa(s); };
+-const fromB64 = (s: string) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+-
+-/** The JsonEx save text of a checkpoint, whichever way it is stored. */
+-export async function saveText(cp: Checkpoint): Promise<string> {
+-    if (cp.z) return gunzip(cp.z);
+-    if (typeof cp.save === 'string') return cp.save;
+-    throw new Error(`checkpoint "${cp.name}" has no save data`);
+-}
+-
+-// ------------------------------------------------------------------ storage
+-const provided = new Map<string, Checkpoint>();   // shipped by mods, in memory only
+-
+-export async function listCheckpoints(): Promise<Checkpoint[]> {
+-    const all = (await tx('readonly', s => s.getAll())) as Checkpoint[];
+-    return [...all, ...provided.values()].sort((a, b) => b.time - a.time);
+-}
+-export const getCheckpoint = (id: string) => provided.has(id) ? Promise.resolve(provided.get(id)) : tx('readonly', s => s.get(id)) as Promise<Checkpoint | undefined>;
+-export async function deleteCheckpoint(id: string): Promise<void> {
+-    if (provided.has(id)) throw new Error('this checkpoint is provided by a mod; disable the mod to remove it');
+-    await tx('readwrite', s => s.delete(id));
+-}
+-
+-const newId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+-
+-export async function captureCheckpoint(name: string, opts: { auto?: boolean; beat?: boolean } = {}): Promise<Checkpoint> {
+-    if (!gameRunning()) throw new Error('no game is running');
+-    g.$gameSystem?.onBeforeSave?.(); // what a real save does: records BGM/BGS and frame count for onAfterLoad
+-    const text = g.JsonEx.stringify(g.DataManager.makeSaveContents());
+-    const cp: Checkpoint = {
+-        id: newId(), name: name.trim() || new Date().toLocaleString(), time: Date.now(),
+-        digest: makeDigest(g), z: await gzip(text), auto: opts.auto, beat: opts.beat,
+-    };
+-    await tx('readwrite', s => s.put(cp));
+-    const prune = async (pick: (c: Checkpoint) => boolean, keep: number) => {
+-        const old = (await listCheckpoints()).filter(c => !c.provided && pick(c));
+-        for (const o of old.slice(keep)) await deleteCheckpoint(o.id);
+-    };
+-    if (opts.auto) await prune(c => !!c.auto, MAX_AUTO);   // keep only the newest few automatic ones
+-    if (opts.beat) await prune(c => !!c.beat, MAX_BEATS);
+-    return cp;
+-}
+-
+-/** Changes from `from` to `to`; `to` defaults to the live game. */
+-export function diffCheckpoint(from: Checkpoint, to?: Checkpoint): Change[] {
+-    return diffDigests(from.digest, to ? to.digest : makeDigest(g));
+-}
+-
+-/**
+- * Put the game into the state of `cp`. Order matters for safety: validate first, take an undo checkpoint,
+- * then swap state, and if anything goes wrong after the swap, put the previous state back.
+- */
+-export async function restoreCheckpoint(cp: Checkpoint): Promise<void> {
+-    if (!g.DataManager || !g.SceneManager) throw new Error('game is not ready');
+-    const text = await saveText(cp);
+-    let contents: any;
+-    try { contents = g.JsonEx.parse(text); } catch (e) { throw new Error(`checkpoint "${cp.name}" is corrupt: ${(e as Error).message}`); }
+-    for (const k of ['system', 'switches', 'variables', 'party', 'map', 'player', 'actors']) {
+-        if (!contents?.[k]) throw new Error(`checkpoint "${cp.name}" is missing "${k}"; not restoring`);
+-    }
+-    const undo = gameRunning() ? await captureCheckpoint(`before restoring "${cp.name}"`, { auto: true }) : null;
+-    try {
+-        g.DataManager.createGameObjects();
+-        g.DataManager.extractSaveContents(g.JsonEx.parse(text));
+-        g.$gameSystem?.onAfterLoad?.();
+-        // Same step the game takes after loading a save: reload the map and enter it.
+-        g.$gamePlayer.reserveTransfer(g.$gameMap.mapId(), g.$gamePlayer.x, g.$gamePlayer.y, g.$gamePlayer.direction(), 2);
+-        g.$gamePlayer.requestMapReload?.();
+-        g.SceneManager.goto(g.Scene_Map);
+-    } catch (e) {
+-        if (undo) { try { g.DataManager.createGameObjects(); g.DataManager.extractSaveContents(g.JsonEx.parse(await saveText(undo))); g.SceneManager.goto(g.Scene_Map); } catch { /* nothing more we can do */ } }
+-        throw new Error(`restore failed (${(e as Error).message}); previous state put back`);
+-    }
+-}
+-
+-// ------------------------------------------------------------------ forging: derive a route state from a recorded one
+-export interface Patch {
+-    /** switch id or exact name -> value */
+-    switches?: Record<string, boolean>;
+-    /** variable id or exact name -> value */
+-    variables?: Record<string, number>;
+-}
+-
+-const resolveId = (list: (string | null)[] | undefined, key: string, what: string): number => {
+-    if (/^\d+$/.test(key)) return Number(key);
+-    const hits = (list ?? []).flatMap((n, i) => (n === key ? [i] : []));
+-    if (hits.length !== 1) throw new Error(`${what} "${key}" ${hits.length ? 'matches several ids (' + hits.join(', ') + '); use the id' : 'does not exist'}`);
+-    return hits[0]!;
+-};
+-
+-/** Scratch variables the game rewrites constantly ('Always Temporary #0'); they are never part of a route. */
+-const SCRATCH_VAR = /^(Always )?Temp(orary)?/i;
+-const sysName = (list: (string | null)[] | undefined, key: string) => list?.[Number(key)] ?? '';
+-
+-/** Everything that differs between two checkpoints, as a patch that turns `from` into `to` (switches and variables only). */
+-export function patchBetween(from: Checkpoint, to: Checkpoint): Patch {
+-    const patch: Patch = { switches: {}, variables: {} };
+-    for (const c of diffDigests(from.digest, to.digest)) {
+-        if (c.section === 'switch') patch.switches![c.key] = !!c.to;
+-        else if (c.section === 'variable' && (typeof c.to === 'number' || c.to === null) && !SCRATCH_VAR.test(sysName(g.$dataSystem?.variables, c.key))) patch.variables![c.key] = (c.to as number | null) ?? 0;
+-    }
+-    return patch;
+-}
+-
+-/**
+- * Make a new checkpoint by applying `patch` to a copy of `base`. The base is never modified. The result is tagged as
+- * forged: it is exactly as consistent as the flags you changed, so verify it by playing a little from it.
+- */
+-export async function forgeCheckpoint(base: Checkpoint, patch: Patch, name: string): Promise<Checkpoint> {
+-    const contents = g.JsonEx.parse(await saveText(base));
+-    const names = dbNames();
+-    const done: string[] = [];
+-    for (const [k, v] of Object.entries(patch.switches ?? {})) { const id = resolveId(names.switches, k, 'switch'); contents.switches.setValue(id, !!v); done.push(`s${id}=${v ? 'ON' : 'off'}`); }
+-    for (const [k, v] of Object.entries(patch.variables ?? {})) { const id = resolveId(names.variables, k, 'variable'); contents.variables.setValue(id, Number(v)); done.push(`v${id}=${v}`); }
+-    if (!done.length) throw new Error('the patch changes nothing');
+-    const digest = makeDigest({ $gameSwitches: contents.switches, $gameVariables: contents.variables, $gameSelfSwitches: contents.selfSwitches, $gameSelfVariables: contents.selfVariables, $gameParty: contents.party, $gameActors: contents.actors, $gameMap: contents.map, $gamePlayer: contents.player });
+-    const cp: Checkpoint = { id: newId(), name: name.trim() || `${base.name} (forged)`, time: Date.now(), digest, z: await gzip(g.JsonEx.stringify(contents)), forged: `from "${base.name}": ${done.slice(0, 12).join(', ')}${done.length > 12 ? ` (+${done.length - 12})` : ''}` };
+-    await tx('readwrite', s => s.put(cp));
+-    return cp;
+-}
+-
+-// ------------------------------------------------------------------ files and mod-shipped checkpoints
+-interface FileForm { format: 'omori-checkpoint'; version: 2; name: string; time?: number; digest: Digest; saveGz: string }
+-
+-export async function exportCheckpoint(cp: Checkpoint): Promise<string> {
+-    const z = cp.z ?? await gzip(await saveText(cp));
+-    const f: FileForm = { format: 'omori-checkpoint', version: 2, name: cp.name, time: cp.time, digest: cp.digest, saveGz: toB64(z) };
+-    return JSON.stringify(f);
+-}
+-
+-/** A mod-loadable script: `OmoriMod.checkpoints.register(...)` with the checkpoint inlined. */
+-export async function exportCheckpointScript(cp: Checkpoint): Promise<string> {
+-    return `// Generated by the checkpoint panel. Ship this in a mod's scripts/ folder.\n(() => { OmoriMod.checkpoints.register(${JSON.stringify(cp.name)}, ${await exportCheckpoint(cp)}); })();\n`;
+-}
+-
+-async function fromFileForm(o: any, id: string, extra: Partial<Checkpoint> = {}): Promise<Checkpoint> {
+-    if (o?.format !== 'omori-checkpoint' || !o.digest) throw new Error('not an OMORI checkpoint file');
+-    const cp: Checkpoint = { id, name: String(o.name ?? 'imported'), time: Date.now(), digest: o.digest, ...extra };
+-    if (typeof o.saveGz === 'string') cp.z = fromB64(o.saveGz);
+-    else if (typeof o.save === 'string') cp.save = o.save;           // version 1 files
+-    else throw new Error('checkpoint file has no save data');
+-    g.JsonEx.parse(await saveText(cp)); // must at least parse
+-    return cp;
+-}
+-
+-export async function importCheckpoint(text: string): Promise<Checkpoint> {
+-    const cp = await fromFileForm(JSON.parse(text), newId());
+-    await tx('readwrite', s => s.put(cp));
+-    return cp;
+-}
+-
+-// ------------------------------------------------------------------ story beats
+-/** A switch that marks story progress: the authored spine, the late-game phase flags, and the endings (see story-model.ts). */
+-export const isBeatSwitch = (name: string) => SPINE_SWITCH.test(name) || PHASE_FLAGS.includes(name) || ENDING_FLAGS.includes(name);
+-/** Route counters that only go up as a route advances; each new high is a beat too ("BS_TRUE_PATH 7"). */
+-const BEAT_COUNTERS = ['[BS_NEUTRAL_PATH]', '[BS_TRUE_PATH]'];
+-
+-let beatSetting: { get(): boolean; set(v: boolean): void } | null = null;
+-
+-export function installBeatRecorder(): void {
+-    const on = beatSetting = portValue<boolean>('checkpoints.recordBeats', false, () => {});
+-    register({
+-        id: 'checkpoints.recordBeats', tab: 'general', group: 'Checkpoints', label: 'Record story beats as checkpoints', default: false,
+-        help: 'The first time each story event happens (Day1FA - Hobbeez, Day2DW - Swim, ...), save a checkpoint named [beat] <event>. One normal playthrough builds a library you can jump between from the debug panel (F9).',
+-        keywords: 'checkpoint story chapter skip', control: { type: 'toggle', get: on.get, set: on.set },
+-    });
+-    const GS = g.Game_Switches?.prototype, SM = g.Scene_Map?.prototype;
+-    if (!GS?.setValue || !SM?.update) return;
+-    const queued = new Map<number, string>();
+-    let known: Set<string> | null = null, busy = false;
+-
+-    const setValue = GS.setValue;
+-    GS.setValue = function (this: any, id: number, v: unknown) {
+-        const was = this.value(id);
+-        const r = setValue.apply(this, arguments as any);
+-        if (v && !was && on.get()) {
+-            const name = g.$dataSystem?.switches?.[id];
+-            if (typeof name === 'string' && isBeatSwitch(name)) queued.set(id, name.trim());
+-        }
+-        return r;
+-    };
+-    const GV = g.Game_Variables?.prototype;
+-    if (GV?.setValue) {
+-        const setVar = GV.setValue, maxSeen = new Map<number, number>();
+-        GV.setValue = function (this: any, id: number, v: unknown) {
+-            const r = setVar.apply(this, arguments as any);
+-            if (on.get() && typeof v === 'number' && v > 0) {
+-                const name = g.$dataSystem?.variables?.[id];
+-                if (BEAT_COUNTERS.includes(name) && v > (maxSeen.get(id) ?? 0)) { maxSeen.set(id, v); queued.set(-id, `${name.slice(1, -1)} ${v}`); }
+-            }
+-            return r;
+-        };
+-    }
+-    // Capture only when nothing is mid-flight (an event running or a message showing), so the saved state is a stable one.
+-    const update = SM.update;
+-    SM.update = function (this: any) {
+-        const r = update.apply(this, arguments as any);
+-        if (queued.size && !busy && on.get() && !g.$gameMap.isEventRunning() && !g.$gameMessage?.isBusy?.() && !g.$gamePlayer.isTransferring()) {
+-            busy = true;
+-            const names = [...queued.values()]; queued.clear();
+-            (async () => {
+-                known ??= new Set((await listCheckpoints()).map(c => c.name));
+-                const fresh = names.filter(n => !known!.has(`[beat] ${n}`));
+-                if (fresh.length) { for (const n of fresh) known!.add(`[beat] ${n}`); await captureCheckpoint(`[beat] ${fresh[0]}`, { beat: true }); }
+-            })().catch(e => console.warn('[checkpoints] beat capture failed', e)).finally(() => { busy = false; });
+-        }
+-        return r;
+-    };
+-}
+-
+-// ------------------------------------------------------------------ routes: where a state is in the story, and what a library covers
+-const dbNames = () => ({ switches: g.$dataSystem?.switches, variables: g.$dataSystem?.variables });
+-export const checkpointSignature = (cp: Checkpoint) => signature(cp.digest, dbNames());
+-export const describeCheckpoint = (cp: Checkpoint) => describe(checkpointSignature(cp));
+-export const checkpointRoute = (cp: Checkpoint) => routeLabel(checkpointSignature(cp));
+-
+-let storyP: Promise<StoryIndex | null> | null = null;
+-/** The story's flags as scanned from this install by the dev server (null if unavailable). Fetched once. */
+-export const loadStory = () => (storyP ??= fetch('/__story.json').then(r => (r.ok ? (r.json() as Promise<StoryIndex>) : null)).catch(() => null));
+-/** Names of the story-progress switches that some event actually turns on (the rest are reserved names that can never happen). */
+-export const settableBeats = (ix: StoryIndex) => [...ix.spine, ...ix.phase, ...ix.endings].filter(f => f.setCount > 0).map(f => f.name.trim());
+-
+-export async function beatCoverage() {
+-    const ix = await loadStory();
+-    if (!ix) return null;
+-    return coverage((await listCheckpoints()).filter(c => c.beat || !c.auto).map(c => c.name), settableBeats(ix));
+-}
+-
+-/** Group checkpoints into route lines (same story decisions so far), each ordered by how far along the story they are. */
+-export function routeLines(cps: Checkpoint[]): { key: string; label: string; items: Checkpoint[] }[] {
+-    const groups = new Map<string, { key: string; label: string; items: Checkpoint[] }>();
+-    for (const c of cps) {
+-        const sig = checkpointSignature(c), key = routeKey(sig);
+-        (groups.get(key) ?? groups.set(key, { key, label: routeLabel(sig), items: [] }).get(key)!).items.push(c);
+-    }
+-    for (const gr of groups.values()) gr.items.sort((a, b) => (checkpointSignature(a).last?.id ?? 0) - (checkpointSignature(b).last?.id ?? 0));
+-    return [...groups.values()];
+-}
+-
+-// ------------------------------------------------------------------ mod API
+-/** `OmoriMod.checkpoints`: the same operations as the debug panel, for mod scripts and automated tests. */
+-export function installCheckpointApi(): void {
+-    const byName = async (nameOrId: string) => {
+-        const all = await listCheckpoints();
+-        const hit = all.find(c => c.id === nameOrId) ?? all.find(c => c.name === nameOrId);
+-        if (!hit) throw new Error(`no checkpoint named "${nameOrId}"`);
+-        return hit;
+-    };
+-    (g.OmoriMod ?? (g.OmoriMod = {})).checkpoints = {
+-        capture: async (name: string) => { const c = await captureCheckpoint(name); return { id: c.id, name: c.name }; },
+-        list: async () => (await listCheckpoints()).map(c => ({ id: c.id, name: c.name, time: c.time, auto: !!c.auto, beat: !!c.beat, forged: c.forged ?? null, provided: c.provided ?? null, map: c.digest.map.id })),
+-        restore: async (nameOrId: string) => restoreCheckpoint(await byName(nameOrId)),
+-        diff: async (nameOrId: string) => diffCheckpoint(await byName(nameOrId)),
+-        remove: async (nameOrId: string) => deleteCheckpoint((await byName(nameOrId)).id),
+-        /** Is automatic story-beat recording on? Pass true/false to change it (same as the Gameplay setting). */
+-        recordBeats: (v?: boolean) => { if (v !== undefined) beatSetting?.set(v); return !!beatSetting?.get(); },
+-        /** What differs between two checkpoints (or one checkpoint and the running game when `b` is omitted), as a patch of switches/variables. */
+-        compare: async (a: string, b?: string) => { const A = await byName(a); return b ? patchBetween(A, await byName(b)) : patchBetween(A, { ...A, digest: makeDigest(g) }); },
+-        /** New checkpoint = a copy of `base` with switches/variables changed. Keys are ids or exact names. Tagged "forged". */
+-        forge: async (base: string, patch: Patch, name: string) => { const c = await forgeCheckpoint(await byName(base), patch, name); return { id: c.id, name: c.name, forged: c.forged }; },
+-        routes: {
+-            /** story position of the running game: furthest spine beat, route label, counters, endings */
+-            current: () => { const d = makeDigest(g), sig = signature(d, dbNames()); return { ...sig, route: routeLabel(sig), text: describe(sig) }; },
+-            /** how many of the story's beats this profile's checkpoints cover, and which are missing (null without the dev server) */
+-            coverage: () => beatCoverage(),
+-            /** checkpoints grouped into route lines, each ordered along the story */
+-            lines: async () => routeLines(await listCheckpoints()).map(l => ({ route: l.label, checkpoints: l.items.map(c => ({ id: c.id, name: c.name, at: describeCheckpoint(c) })) })),
+-        },
+-        /** Make a checkpoint (in the file format the panel exports) available to the player; lives for this session, from the calling mod. */
+-        register: (name: string, data: unknown) => {
+-            const mod = g.OmoriMod.scope?.().id ?? '(mod)';
+-            void fromFileForm(data, `mod:${mod}:${name}`, { name, provided: mod, time: 0 })
+-                .then(cp => { provided.set(cp.id, cp); })
+-                .catch(e => g.OmoriMod.scope?.(mod).error?.(e, `checkpoint "${name}"`));
+-        },
+-    };
+-}
+diff --git a/src/client/debug.ts b/src/client/debug.ts
+index c03c613..4c9223b 100644
+--- a/src/client/debug.ts
++++ b/src/client/debug.ts
+@@ -2,11 +2,9 @@
+ // so it can teleport, edit switches/variables, give items, heal the party, etc. Nothing here is saved
+ // unless you save the game afterwards.
+ import { listAsync } from './shim/index.ts';
+-import { describeChange } from './checkpoint-core.ts';
+-import { captureCheckpoint, deleteCheckpoint, diffCheckpoint, exportCheckpoint, exportCheckpointScript, gameRunning, beatCoverage, describeCheckpoint, routeLines, importCheckpoint, listCheckpoints, restoreCheckpoint, type Checkpoint } from './checkpoints.ts';
+ 
+-type Tab = 'maps' | 'switches' | 'variables' | 'party' | 'items' | 'checkpoints' | 'game';
+-const TABS: Tab[] = ['maps', 'switches', 'variables', 'party', 'items', 'checkpoints', 'game'];
++type Tab = 'maps' | 'switches' | 'variables' | 'party' | 'items' | 'game';
++const TABS: Tab[] = ['maps', 'switches', 'variables', 'party', 'items', 'game'];
+ const MAX_ROWS = 150; // rows rendered per list; use the filter box to narrow
+ 
+ type Child = Node | string | null | false;
+@@ -213,88 +211,6 @@ export function installDebug(): void {
+         return wrap;
+     }
+ 
+-    function download(text: string, name: string, type: string) {
+-        const a = h('a', { href: URL.createObjectURL(new Blob([text], { type })), download: name });
+-        a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+-    }
+-    // Checkpoints: capture the whole game, see what changed since, restore (always with an automatic undo).
+-    let cpOpen: string | null = null;
+-    function checkpointsTab(): HTMLElement {
+-        const wrap = h('div');
+-        const list = h('div', {}, h('div', { class: 'note' }, 'loading...'));
+-        const fail = (e: unknown) => say(e instanceof Error ? e.message : String(e));
+-        const nameIn = h('input', { type: 'text', placeholder: 'name (e.g. "start of chapter 2")' });
+-        const file = h('input', { type: 'file', accept: '.json', style: 'display:none', onchange: async (e: Event) => {
+-            const f = (e.target as HTMLInputElement).files?.[0];
+-            if (!f) return;
+-            try { await importCheckpoint(await f.text()); say('imported'); } catch (err) { fail(err); }
+-            render();
+-        } });
+-        let cps: Checkpoint[] = [];
+-        let byRoute = false;
+-        const names = () => ({ switches: $dataSystem?.switches, variables: $dataSystem?.variables, items: $dataItems, weapons: $dataWeapons, armors: $dataArmors });
+-        const paint = () => {
+-            list.replaceChildren();
+-            const f = filter.trim().toLowerCase();
+-            const shown = cps.filter(c => !f || `${c.name} ${describeCheckpoint(c)}`.toLowerCase().includes(f));
+-            if (!cps.length) list.append(h('div', { class: 'note' }, 'No checkpoints yet. Capture one, or turn on "Record story beats" in Settings > Gameplay and play.'));
+-            else if (!shown.length) list.append(h('div', { class: 'note' }, 'no matches'));
+-            if (byRoute) {
+-                let n = 0;
+-                for (const line of routeLines(shown)) {
+-                    list.append(h('div', { class: 'note', style: 'margin-top:8px;font-weight:bold' }, `${line.label} route · ${line.items.length}`));
+-                    for (const cp of line.items) { if (n++ < MAX_ROWS) list.append(checkpointRow(cp, names(), fail)); }
+-                }
+-            } else for (const cp of shown.slice(0, MAX_ROWS)) list.append(checkpointRow(cp, names(), fail));
+-            if (shown.length > MAX_ROWS) list.append(h('div', { class: 'note' }, `${shown.length - MAX_ROWS} more, narrow the filter`));
+-        };
+-        wrap.append(h('div', { class: 'bar' }, nameIn,
+-            btn('Capture', async () => {
+-                if (!gameRunning()) return say('start a game first');
+-                try { await captureCheckpoint(nameIn.value); say('captured'); } catch (e) { fail(e); }
+-                render();
+-            }), btn('Import', () => file.click()), file));
+-        const groupBtn = h('button', { onclick: () => { byRoute = !byRoute; groupBtn.textContent = byRoute ? 'Order: by route' : 'Order: by time'; paint(); } }, 'Order: by time');
+-        wrap.append(h('div', { class: 'bar' }, groupBtn));
+-        const cov = h('div', { class: 'note' });
+-        wrap.append(cov);
+-        void beatCoverage().then(c => {
+-            if (!c) return;
+-            cov.textContent = `Story beats captured: ${c.recorded} of ${c.total}. `;
+-            if (c.missing.length) {
+-                const link = h('a', { href: '#', style: 'color:#8fa2ff', onclick: (e: Event) => { e.preventDefault(); cov.append(h('pre', { class: 'diff' }, c.missing.join('\n'))); link.remove(); } }, 'show missing');
+-                cov.append(link);
+-            }
+-        });
+-        wrap.append(h('div', { class: 'bar' }, h('input', { type: 'text', placeholder: 'filter by name or route (e.g. "Day2", "true")', value: filter, oninput: (e: Event) => { filter = (e.target as HTMLInputElement).value; paint(); } })));
+-        wrap.append(list);
+-        void listCheckpoints().then(all => { cps = all; paint(); }).catch(fail);
+-        return wrap;
+-    }
+-    function checkpointRow(cp: Checkpoint, names: any, fail: (e: unknown) => void): HTMLElement {
+-        const row = h('div', { class: 'cp' },
+-            h('div', { class: 'row' }, h('span', { class: 'nm', title: new Date(cp.time).toLocaleString() }, (cp.auto ? '(auto) ' : '') + (cp.forged ? '(forged) ' : '') + (cp.provided ? `(mod ${cp.provided}) ` : '') + cp.name),
+-                h('span', { class: 'id', title: describeCheckpoint(cp) }, `map ${cp.digest.map.id}`),
+-                btn('changes', () => { cpOpen = cpOpen === cp.id ? null : cp.id; render(); }),
+-                btn('restore', async () => {
+-                    if (!confirm(`Restore "${cp.name}"? The current state is saved first as an automatic checkpoint.`)) return;
+-                    try { await restoreCheckpoint(cp); toggle(false); } catch (e) { fail(e); }
+-                }),
+-                btn('file', async () => download(await exportCheckpoint(cp), `${cp.name.replace(/[^\w.-]+/g, '_')}.checkpoint.json`, 'application/json')),
+-                btn('script', async () => download(await exportCheckpointScript(cp), `${cp.name.replace(/[^\w.-]+/g, '_')}.js`, 'text/javascript')),
+-                btn('x', async () => { try { await deleteCheckpoint(cp.id); } catch (e) { fail(e); } render(); })));
+-        row.append(h('div', { class: 'note', style: 'margin:0 0 4px 8px' }, `${describeCheckpoint(cp)}${cp.forged ? ' · forged ' + cp.forged : ''}`));
+-        if (cpOpen === cp.id) {
+-            if (!gameRunning()) row.append(h('div', { class: 'note' }, 'Start a game to compare against it.'));
+-            else {
+-                const lines = diffCheckpoint(cp).map(c => describeChange(c, names));
+-                row.append(h('div', { class: 'note' }, lines.length ? `${lines.length} difference(s) between this checkpoint and now:` : 'Identical to the current state.'),
+-                    h('pre', { class: 'diff' }, lines.slice(0, 300).join('\n') + (lines.length > 300 ? `\n... ${lines.length - 300} more` : '')));
+-            }
+-        }
+-        return row;
+-    }
+-
+     function gameTab(): HTMLElement {
+         const wrap = h('div');
+         const params = new URLSearchParams(location.search);
+@@ -324,7 +240,6 @@ export function installDebug(): void {
+         nav.replaceChildren(...TABS.map(t => h('button', { class: t === tab ? 'on' : '', onclick: () => { tab = t; filter = ''; render(); } }, t)));
+         body.replaceChildren();
+         if (tab === 'party') body.append(partyTab());
+-        else if (tab === 'checkpoints') body.append(checkpointsTab());
+         else if (tab === 'game') body.append(gameTab());
+         else {
+             const warn = tab === 'maps' ? null : needGame();
 diff --git a/src/client/display.ts b/src/client/display.ts
 index f8d1a89..bc710b0 100644
 --- a/src/client/display.ts
@@ -2021,11 +2672,86 @@ index 409b197..e6bf032 100644
      // The game throws on first run if this file is missing.
      if (!fs.existsSync('/appdata/OMORI/CUTSCENE.json')) fs.writeFileSync('/appdata/OMORI/CUTSCENE.json', '{}');
  })();
+diff --git a/src/client/story-model.test.ts b/src/client/story-model.test.ts
+index 255d6bf..0b9ba90 100644
+--- a/src/client/story-model.test.ts
++++ b/src/client/story-model.test.ts
+@@ -1,6 +1,5 @@
+ import { describe as suite, expect, test } from 'bun:test';
+-import type { Digest } from './checkpoint-core.ts';
+-import { coverage, describe, routeKey, routeLabel, signature, SPINE_SWITCH } from './story-model.ts';
++import { describe, routeKey, routeLabel, signature, SPINE_SWITCH, type Digest } from './story-model.ts';
+ 
+ const sn = ['', 'Day1FA - Hobbeez', 'Day2DW - Saved Basil?', '[Something Battle]', '[Neutral: Epilogue]', '[True: Stab End]', 'NiFA-FearofSpiders', 'Day 3 vending machine', 'Day2DW - RESERVED'];
+ const vn = ['', 'World Value (WS/FA/DW/BS)', '[BS_TRUE_PATH]', '[BS_NEUTRAL_PATH]', 'BASIL_END', 'Stab_Counter', 'Unrelated'];
+@@ -40,8 +39,4 @@ suite('story model', () => {
+         expect(describe(signature(dig([]), db))).toBe('start');
+         expect(describe(signature(dig([2], { 2: 7 }), db))).toBe('Day2DW - Saved Basil? · true route · BS_TRUE_PATH 7');
+     });
+-    test('coverage counts recorded beats, ignoring the [beat] prefix and non-beats', () => {
+-        const c = coverage(['[beat] Day1FA - Hobbeez', 'my own checkpoint', '[beat] [Blackspace]'], ['Day1FA - Hobbeez', 'Day2DW - Swim', '[Blackspace]']);
+-        expect(c).toEqual({ recorded: 2, total: 3, missing: ['Day2DW - Swim'] });
+-    });
+ });
+diff --git a/src/client/story-model.ts b/src/client/story-model.ts
+index 96e41c1..44bf514 100644
+--- a/src/client/story-model.ts
++++ b/src/client/story-model.ts
+@@ -2,7 +2,19 @@
+ // Everything here is keyed by the flags' NAMES in the game's database (data/System), not by number, and is pure
+ // (no game or browser globals), so it is unit-tested. The facts behind these lists are in docs/STORY-MODEL.md and
+ // can be regenerated from any install with `bun run mod routes`.
+-import type { Digest } from './checkpoint-core.ts';
++export interface Digest {
++    switches: number[];
++    variables: Record<number, unknown>;
++    selfSwitches: Record<string, boolean>;
++    selfVariables: Record<string, unknown>;
++    gold: number;
++    items: Record<number, number>;
++    weapons: Record<number, number>;
++    armors: Record<number, number>;
++    party: number[];
++    levels: Record<number, number>;
++    map: { id: number; x: number; y: number };
++}
+ 
+ /**
+  * The authored story spine: one contiguous block of switches (ids 961-1059 in the Steam build) named
+@@ -89,15 +101,8 @@ export function describe(s: Signature): string {
+ 
+ /**
+  * Identity of a route line: two states with the same key made the same story decisions so far
+- * (it ignores how far along the spine they are). Used to group a checkpoint library by route.
++ * (it ignores how far along the spine they are). Used to group states by route.
+  */
+ export function routeKey(s: Signature): string {
+     return JSON.stringify([routeLabel(s), s.savedBasil, s.counters['BASIL_END'] ?? 0, s.counters['Stab_Counter'] ?? 0, [...s.endings].sort()]);
+ }
+-
+-/** Spine beats a library has captured vs the beats that actually can happen. */
+-export function coverage(recordedNames: Iterable<string>, settable: string[]): { recorded: number; total: number; missing: string[] } {
+-    const have = new Set([...recordedNames].map(n => n.replace(/^\[beat\]\s*/, '').trim()));
+-    const missing = settable.filter(n => !have.has(n.trim()));
+-    return { recorded: settable.length - missing.length, total: settable.length, missing };
+-}
+diff --git a/src/mods/storyscan.ts b/src/mods/storyscan.ts
+index 71b6f99..26c2605 100644
+--- a/src/mods/storyscan.ts
++++ b/src/mods/storyscan.ts
+@@ -1,7 +1,6 @@
+ // Story scanner: reads every map event and common event of the player's own game and builds an index of the story's
+ // flags: which switches/variables are set where, which events are gated by them, and which events act as "hubs"
+ // (an event whose many pages are gated by story switches, i.e. the game's own priority ladder of story positions).
+-// Used by `bun run mod routes` (a readable report) and by the dev server (/__story.json, for checkpoint coverage).
+ import { SPINE_SWITCH, PHASE_FLAGS, ENDING_FLAGS, ROUTE_COUNTERS } from '../client/story-model.ts';
+ 
+ export interface ScanSource {
 diff --git a/src/server.ts b/src/server.ts
-index 47b4598..47aed02 100644
+index 47b4598..89553a2 100644
 --- a/src/server.ts
 +++ b/src/server.ts
-@@ -1,9 +1,8 @@
+@@ -1,29 +1,14 @@
  // Static server for the OMORI browser port: `bun run src/server.ts [port]`
  // Serves the game's www folder read-only, plus the built client bundle and a directory-listing endpoint.
 -import { appendFileSync, readdirSync, statSync, watch, writeFileSync } from 'node:fs';
@@ -2036,9 +2762,9 @@ index 47b4598..47aed02 100644
 +import { join, sep } from 'node:path';
 +import { isOsJunk } from './mods/vfs.ts';
  import { ROOT, WWW, ensureGameDir, readGameKey } from './gamedir.ts';
- import { storyIndex } from './mods/mapkit-node.ts';
+-import { storyIndex } from './mods/mapkit-node.ts';
  
-@@ -11,19 +10,6 @@ if (!ensureGameDir()) process.exit(1);   // asks for your OMORI folder the first
+ if (!ensureGameDir()) process.exit(1);   // asks for your OMORI folder the first time
  
  const PORT = Number(process.argv[2] ?? process.env.PORT ?? 8080);
  
@@ -2058,10 +2784,13 @@ index 47b4598..47aed02 100644
  const TYPES: Record<string, string> = { yaml: 'text/plain', yml: 'text/plain', md: 'text/plain', ogg: 'audio/ogg', webm: 'video/webm' };
  
  /** Resolve a request path inside WWW, tolerating wrong case (the game asks for /Languages/ but the folder is languages/). */
-@@ -95,25 +81,6 @@ const server = Bun.serve({
-         // Story flags of this install (used by the checkpoint panel for coverage). Scanned once, on first request.
-         if (rel === '/__story.json') { try { return Response.json(storyIndex()); } catch (e) { return new Response(String(e), { status: 500 }); } }
+@@ -92,28 +77,6 @@ const server = Bun.serve({
+         }
+         if (rel === '/sw.js') return fileResponse(join(ROOT, 'dist', 'sw.js'), req, undefined, { 'service-worker-allowed': '/' });
  
+-        // Story flags of this install (used by the checkpoint panel for coverage). Scanned once, on first request.
+-        if (rel === '/__story.json') { try { return Response.json(storyIndex()); } catch (e) { return new Response(String(e), { status: 500 }); } }
+-
 -        // ---- mod API (see docs/MODDING.md)
 -        if (rel === '/__mods/version') return Response.json({ version: modsVersion });
 -        if (rel === '/__mods/list') {
@@ -2649,10 +3378,10 @@ index 0000000..fdc4d78
 +}
 diff --git a/src/web/touch.ts b/src/web/touch.ts
 new file mode 100644
-index 0000000..15c7b27
+index 0000000..f60fc1c
 --- /dev/null
 +++ b/src/web/touch.ts
-@@ -0,0 +1,318 @@
+@@ -0,0 +1,315 @@
 +type Name = 'up' | 'down' | 'left' | 'right' | 'ok' | 'escape' | 'shift' | 'pagedown' | 'tag';
 +type GroupId = 'pad' | 'ok' | 'escape' | 'shift' | 'pagedown' | 'tag';
 +const g = globalThis as any;
@@ -2742,7 +3471,7 @@ index 0000000..15c7b27
 +    add('escape', 'B', 0.5, m => [m.W - m.R - 2.05 * m.u, m.H - m.B - 0.9 * m.u]);
 +    add('shift', 'RUN', 0.5, m => [m.W - m.R - 2.05 * m.u, m.H - m.B - 2.05 * m.u], false, 'calc(var(--u)*.26)');
 +    add('pagedown', 'W', 0.39, m => [m.W - m.R - 0.79 * m.u, m.T + 0.64 * m.u], true);
-+    add('tag', 'TAG', 0.39, m => [m.W - m.R - 0.79 * m.u, m.T + 1.65 * m.u], true, 'calc(var(--u)*.2)');
++    add('tag', 'TAG', 0.39, m => [m.W - m.R - 0.79 * m.u, m.H - m.B - 0.9 * m.u], true, 'calc(var(--u)*.23)');
 +    const gear = document.createElement('div');
 +    gear.className = 'b small';
 +    gear.textContent = 'E'; gear.setAttribute('aria-label', 'Edit touch layout');
@@ -2885,7 +3614,6 @@ index 0000000..15c7b27
 +    gear.addEventListener('pointerdown', e => { e.stopPropagation(); });
 +    gear.addEventListener('pointerup', e => { e.stopPropagation(); e.preventDefault(); openEditor(); });
 +    root.addEventListener('pointerdown', (e: PointerEvent) => {
-+        e.stopPropagation();
 +        if (portrait) return;
 +        const t = e.target as HTMLElement;
 +        if (t === gear) return;
@@ -2913,7 +3641,6 @@ index 0000000..15c7b27
 +        apply();
 +    });
 +    root.addEventListener('pointermove', (e: PointerEvent) => {
-+        e.stopPropagation();
 +        if (editing) {
 +            if (!drag || drag.pointer !== e.pointerId) return;
 +            e.preventDefault();
@@ -2930,7 +3657,6 @@ index 0000000..15c7b27
 +        apply();
 +    });
 +    const up = (e: PointerEvent) => {
-+        e.stopPropagation();
 +        if (drag && drag.pointer === e.pointerId) { drag = null; return; }
 +        if (!owner.has(e.pointerId)) return;
 +        e.preventDefault(); owner.delete(e.pointerId); down.delete(e.pointerId); apply();
@@ -3107,6 +3833,157 @@ index 0000000..0b75a3d
 +    return null;
 +}
 +export const extractKey = (text: string): string | null => /--([0-9a-f]{32})/i.exec(text)?.[1]?.toLowerCase() ?? null;
+diff --git a/test/checkpoints.ts b/test/checkpoints.ts
+deleted file mode 100644
+index 7c76f8a..0000000
+--- a/test/checkpoints.ts
++++ /dev/null
+@@ -1,145 +0,0 @@
+-// Checkpoints through the debug panel: capture, change state, diff, restore, undo checkpoint exists.
+-import puppeteer from 'puppeteer-core';
+-import { mkdirSync } from 'node:fs';
+-import { ANGLE, CHROME } from './chrome.ts';
+-mkdirSync('test/out', { recursive: true });
+-const server = Bun.spawn(['bun', 'run', 'src/server.ts', '8095'], { stdout: 'ignore', stderr: 'inherit' });
+-await new Promise(r => setTimeout(r, 500));
+-const failures: string[] = [];
+-const check = (ok: boolean, msg: string) => { console.log(ok ? 'ok  ' : 'FAIL', msg); if (!ok) failures.push(msg); };
+-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+-try {
+-  const b = await puppeteer.launch({ executablePath: CHROME, headless: true, defaultViewport: { width: 1920, height: 940 },
+-    args: ['--ignore-gpu-blocklist', '--enable-gpu', ANGLE] });
+-  const p = await b.newPage();
+-  const errs: string[] = [];
+-  p.on('pageerror', e => errs.push((e as Error).message));
+-  p.on('dialog', d => void d.accept());
+-  await p.goto('http://127.0.0.1:8095/?profile=default');
+-  await p.waitForFunction(() => (globalThis as any).SceneManager?._scene?.constructor?.name === 'Scene_OmoriTitleScreen', { timeout: 90000 });
+-
+-  const tab = (name: string) => p.evaluate(n => { for (const x of document.querySelectorAll<HTMLButtonElement>('#dbg nav button')) if (x.textContent === n) x.click(); }, name);
+-  const press = (label: string) => p.evaluate(l => { for (const x of document.querySelectorAll<HTMLButtonElement>('#dbg button')) if (x.textContent === l) { x.click(); return true; } return false; }, label);
+-
+-  await p.keyboard.press('F9');
+-  await p.type('#dbg input[type=text]', 'player street');
+-  await p.click('#dbg .row.hit');
+-  await p.waitForFunction(() => SceneManager._scene instanceof Scene_Map && $gameMap.mapId() === 13 && !$gamePlayer.isTransferring(), { timeout: 60000 });
+-  await sleep(1500);
+-
+-  // state A
+-  await p.evaluate(() => { $gameSwitches.setValue(5, true); $gameVariables.setValue(3, 7); $gameParty.gainGold(123); });
+-  await p.keyboard.press('F9');
+-  await tab('checkpoints');
+-  await p.type('#dbg input[type=text]', 'state A');
+-  await press('Capture');
+-  await p.waitForFunction(() => /state A/.test(document.querySelector('#dbg .body')?.textContent ?? ''), { timeout: 10000 });
+-  check(true, 'checkpoint captured and listed');
+-
+-  // state B
+-  await p.evaluate(() => { $gameSwitches.setValue(5, false); $gameSwitches.setValue(6, true); $gameVariables.setValue(3, 99); $gameParty.gainGold(1000); });
+-  await press('changes');
+-  await p.waitForSelector('#dbg .diff', { timeout: 10000 });
+-  const diff = await p.$eval('#dbg .diff', e => e.textContent ?? '');
+-  check(/switch 6.*ON/.test(diff) && /switch 5.*off/.test(diff) && /variable 3.*7 -> 99/.test(diff) && /gold/.test(diff), `diff lists the changes (${diff.split('\n').length} lines)`);
+-
+-  // restore A
+-  await press('restore');
+-  await p.waitForFunction(() => SceneManager._scene instanceof Scene_Map && !$gamePlayer.isTransferring() && $gameVariables.value(3) === 7, { timeout: 30000 });
+-  await sleep(1000);
+-  const s = await p.evaluate(() => ({ s5: $gameSwitches.value(5), s6: $gameSwitches.value(6), v3: $gameVariables.value(3), map: $gameMap.mapId(), cur: SceneManager._scene.constructor.name }));
+-  check(s.s5 === true && s.s6 === false && s.v3 === 7 && s.map === 13 && s.cur === 'Scene_Map', `restore brought back state A (${JSON.stringify(s)})`);
+-
+-  await p.keyboard.press('F9');
+-  await tab('checkpoints');
+-  await sleep(300);
+-  const text = await p.$eval('#dbg .body', e => e.textContent ?? '');
+-  check(/\(auto\) before restoring "state A"/.test(text), 'automatic undo checkpoint was created');
+-
+-  // undo the restore from the auto checkpoint -> state B
+-  await p.evaluate(() => { for (const row of document.querySelectorAll('#dbg .cp')) if (/\(auto\)/.test(row.textContent ?? '')) { for (const x of row.querySelectorAll('button')) if (x.textContent === 'restore') x.click(); } });
+-  await p.waitForFunction(() => SceneManager._scene instanceof Scene_Map && !$gamePlayer.isTransferring() && $gameVariables.value(3) === 99, { timeout: 30000 });
+-  check(await p.evaluate(() => $gameSwitches.value(6)) === true, 'undo checkpoint restores the pre-restore state');
+-  const api = await p.evaluate(async () => { const l = await (globalThis as any).OmoriMod.checkpoints.list(); const d = await (globalThis as any).OmoriMod.checkpoints.diff('state A'); return { names: l.map((c: any) => c.name), changes: d.length }; });
+-  check(api.names.includes('state A') && api.changes > 0, `OmoriMod.checkpoints works from scripts (${api.names.length} checkpoints, ${api.changes} changes vs state A)`);
+-  // story-beat recorder: first time a "DayNFA - ..." switch turns on, one checkpoint (and not again)
+-  await p.evaluate(() => (globalThis as any).OmoriMod.checkpoints.recordBeats(true));
+-  await p.evaluate(() => $gameSwitches.setValue(996, true));
+-  await p.waitForFunction(async () => (await (globalThis as any).OmoriMod.checkpoints.list()).some((c: any) => c.beat), { timeout: 15000, polling: 300 });
+-  await p.evaluate(() => { $gameSwitches.setValue(996, false); $gameSwitches.setValue(996, true); });
+-  await sleep(1500);
+-  const beats = await p.evaluate(async () => (await (globalThis as any).OmoriMod.checkpoints.list()).filter((c: any) => c.beat).map((c: any) => c.name));
+-  check(beats.length === 1 && beats[0] === '[beat] Day1FA - Hobbeez', `beat recorder makes one checkpoint per story beat (${beats.join(', ')})`);
+-  await p.evaluate(() => (globalThis as any).OmoriMod.checkpoints.recordBeats(false));
+-
+-  // forging: derive a state from a recorded checkpoint by patching flags (by id or by exact name), never touching the base
+-  const fg = await p.evaluate(async () => {
+-    const api = (globalThis as any).OmoriMod.checkpoints;
+-    const recipe = await api.compare('state A');                     // live game (state B at this point) vs state A
+-    const made = await api.forge('state A', { switches: { '6': true, 'Day1FA - Hobbeez': true }, variables: { '3': 123 } }, 'forged from A');
+-    const errs: string[] = [];
+-    for (const bad of [{ switches: { 'No such switch': true } }, { switches: { 'Day0DW-': true } }, {}]) { try { await api.forge('state A', bad, 'x'); errs.push('accepted'); } catch (e) { errs.push((e as Error).message); } }
+-    const diffBase = await api.diff('state A');
+-    return { recipe, made, errs, listed: (await api.list()).find((c: any) => c.name === 'forged from A')?.forged, diffBase: diffBase.length };
+-  });
+-  check(fg.recipe.switches['6'] === true && fg.recipe.switches['5'] === false && fg.recipe.variables['3'] === 99, `compare() returns the flag differences as a patch (${JSON.stringify(fg.recipe).slice(0, 90)})`);
+-  check(/^from "state A": s6=ON, s996=ON, v3=123$/.test(fg.made.forged) && !!fg.listed, `forge() records what it changed (${fg.made.forged})`);
+-  check(/does not exist/.test(fg.errs[0]!) && /matches several/.test(fg.errs[1]!) && /changes nothing/.test(fg.errs[2]!), `forge() rejects unknown names, ambiguous names and empty patches (${fg.errs.map((e: string) => e.slice(0, 30)).join(' | ')})`);
+-  await p.evaluate(() => (globalThis as any).OmoriMod.checkpoints.restore('forged from A'));
+-  await p.waitForFunction(() => SceneManager._scene instanceof Scene_Map && !$gamePlayer.isTransferring() && $gameVariables.value(3) === 123, { timeout: 30000 });
+-  const forged = await p.evaluate(() => ({ s5: $gameSwitches.value(5), s6: $gameSwitches.value(6), s996: $gameSwitches.value(996), v3: $gameVariables.value(3) }));
+-  check(forged.s5 === true && forged.s6 === true && forged.s996 === true && forged.v3 === 123, `restoring the forged checkpoint gives A's state plus the patch (${JSON.stringify(forged)})`);
+-
+-  // routes: story position, route label, coverage against the real story, grouping
+-  const rt = await p.evaluate(async () => {
+-    const R = (globalThis as any).OmoriMod.checkpoints.routes;
+-    const cur = R.current(), cov = await R.coverage(), lines = await R.lines();
+-    return { last: cur.last?.name, route: cur.route, text: cur.text, cov: cov && { recorded: cov.recorded, total: cov.total, missingHas: cov.missing.includes('Day2DW - Saved Basil?'), recordedHasHob: !cov.missing.includes('Day1FA - Hobbeez') }, lines: lines.map((l: any) => l.route) };
+-  });
+-  check(rt.last === 'Day1FA - Hobbeez' && rt.route === 'undecided', `routes.current() reads the story position (${rt.text})`);
+-  check(!!rt.cov && rt.cov.total > 40 && rt.cov.recorded >= 1 && rt.cov.recordedHasHob && rt.cov.missingHas, `coverage compares the library with the story's settable beats (${rt.cov?.recorded} of ${rt.cov?.total})`);
+-  check(rt.lines.length >= 1, `checkpoints group into route lines (${rt.lines.join(', ')})`);
+-  await p.evaluate(() => { (globalThis as any).OmoriMod.checkpoints.recordBeats(true); $gameSwitches.setValue(1057, true); });   // Day2DW - Saved Basil?
+-  await p.waitForFunction(async () => (await (globalThis as any).OmoriMod.checkpoints.list()).some((c: any) => c.name === '[beat] Day2DW - Saved Basil?'), { timeout: 15000, polling: 300 });
+-  await p.evaluate(() => { $gameVariables.setValue(1076, 3); });   // [BS_TRUE_PATH] counter reaches 3
+-  await p.waitForFunction(async () => (await (globalThis as any).OmoriMod.checkpoints.list()).some((c: any) => c.name === '[beat] BS_TRUE_PATH 3'), { timeout: 15000, polling: 300 });
+-  const lines2 = await p.evaluate(async () => (await (globalThis as any).OmoriMod.checkpoints.routes.lines()).map((l: any) => `${l.route}:${l.checkpoints.length}`));
+-  check(lines2.some((l: string) => l.startsWith('true:')), `a counter beat is recorded and lands on the true route line (${lines2.join(', ')})`);
+-  await p.evaluate(() => (globalThis as any).OmoriMod.checkpoints.recordBeats(false));
+-  // the panel shows the coverage line and the story position of each checkpoint
+-  await p.keyboard.press('F9');
+-  await p.evaluate(() => { for (const b of document.querySelectorAll<HTMLButtonElement>('#dbg nav button')) if (b.textContent === 'checkpoints') b.click(); });
+-  await p.waitForFunction(() => /Story beats captured: \d+ of \d+/.test(document.querySelector('#dbg .body')?.textContent ?? ''), { timeout: 20000 });
+-  const panel = await p.$eval('#dbg .body', e => e.textContent ?? '');
+-  check(/true route/.test(panel) && /Day1FA - Hobbeez/.test(panel), 'panel shows coverage and the story position of each checkpoint');
+-  await p.keyboard.press('F9');
+-
+-  // storage is gzipped and much smaller than the raw save
+-  const st = await p.evaluate(() => new Promise<any>((res, rej) => {
+-    const r = indexedDB.open('omori-checkpoints');
+-    r.onsuccess = () => { const q = r.result.transaction('checkpoints').objectStore('checkpoints').getAll(); q.onsuccess = () => { const c = q.result.find((x: any) => x.beat); res({ gz: c.z.length, plain: JSON.stringify(JSON.stringify(c.digest)).length, hasSave: 'save' in c && !!c.save }); }; q.onerror = () => rej(q.error); };
+-  }));
+-  check(st.gz > 0 && !st.hasSave, `checkpoints are stored gzipped (${(st.gz / 1024).toFixed(0)} KB)`);
+-
+-  // a mod can ship a checkpoint: build the file form from a stored one, register it, restore it, and it cannot be deleted
+-  const prov = await p.evaluate(async () => {
+-    const raw: any = await new Promise(res => { const r = indexedDB.open('omori-checkpoints'); r.onsuccess = () => { const q = r.result.transaction('checkpoints').objectStore('checkpoints').getAll(); q.onsuccess = () => res(q.result.find((x: any) => x.beat)); }; });
+-    let bin = ''; for (const b of raw.z) bin += String.fromCharCode(b);
+-    const api = (globalThis as any).OmoriMod.checkpoints;
+-    api.register('Shipped by a mod', { format: 'omori-checkpoint', version: 2, name: 'Shipped by a mod', digest: raw.digest, saveGz: btoa(bin) });
+-    await new Promise(r => setTimeout(r, 800));
+-    const l = await api.list();
+-    const hit = l.find((c: any) => c.name === 'Shipped by a mod');
+-    let delErr = ''; try { await api.remove('Shipped by a mod'); } catch (e) { delErr = (e as Error).message; }
+-    await api.restore('Shipped by a mod');
+-    return { listed: !!hit && !!hit.provided, delErr };
+-  });
+-  await p.waitForFunction(() => SceneManager._scene instanceof Scene_Map && !$gamePlayer.isTransferring(), { timeout: 30000 });
+-  check(prov.listed && /provided by a mod/.test(prov.delErr), `mod-provided checkpoint is listed, restorable, and not deletable (${prov.delErr})`);
+-  check(await p.evaluate(() => $gameSwitches.value(996)) === true, 'restoring the shipped checkpoint put its state back');
+-  await p.screenshot({ path: 'test/out/checkpoints.png' });
+-  check(errs.length === 0, `no page errors${errs.length ? ': ' + errs[0] : ''}`);
+-  await b.close();
+-} finally { server.kill(); }
+-if (failures.length) { console.error(`\n${failures.length} check(s) failed`); process.exit(1); }
+-console.log('\nall checkpoint checks passed');
 diff --git a/test/mods.ts b/test/mods.ts
 deleted file mode 100644
 index 02d704c..0000000
@@ -3311,6 +4188,35 @@ index 02d704c..0000000
 -}
 -if (failures.length) { console.error(`\n${failures.length} failure(s)`); process.exit(1); }
 -console.log('\nall mod tests passed');
+diff --git a/test/newgame-plus.ts b/test/newgame-plus.ts
+index 9988d7c..7ed3dca 100644
+--- a/test/newgame-plus.ts
++++ b/test/newgame-plus.ts
+@@ -1,4 +1,3 @@
+-// New Game+ example mod: carry-over of levels/items/gold into a fresh game, options respected, checkpoint made first.
+ import puppeteer from 'puppeteer-core';
+ import { mkdirSync } from 'node:fs';
+ import { ANGLE, CHROME } from './chrome.ts';
+@@ -46,8 +46,6 @@ try {
+   check(after.lv === before.lv && after.item === before.item && after.gold === before.gold, `levels, items and gold carried over (${JSON.stringify(before)} -> ${JSON.stringify(after)})`);
+   check(after.sw === false && after.v3 === 0, 'story state was reset (switch and variable back to defaults)');
+   check(after.cycle === 1, 'cycle counter is 1');
+-  const cps = await p.evaluate(async () => (await (globalThis as any).OmoriMod.checkpoints.list()).map((c: any) => c.name));
+-  check(cps.includes('before New Game+'), 'a checkpoint of the old game was saved first');
+ 
+   // options: turn levels off, run again from the new game -> level resets to default but the cycle goes up
+   await p.evaluate(() => { (globalThis as any).NewGamePlus.options.levels.set(false); });
+@@ -69,10 +67,6 @@ try {
+   await sleep(1500);
+   await p.keyboard.press('Escape'); await sleep(300);
+ 
+-  // and the old game is recoverable
+-  await p.evaluate(async () => { const l = (await (globalThis as any).OmoriMod.checkpoints.list()).filter((c: any) => c.name === 'before New Game+'); await (globalThis as any).OmoriMod.checkpoints.restore(l[l.length - 1].id); });   // the oldest = the original game
+-  await p.waitForFunction(() => SceneManager._scene instanceof Scene_Map && !$gamePlayer.isTransferring() && $gameVariables.value(3) === 42, { timeout: 30000 });
+-  check(true, 'restoring "before New Game+" brings the old game back');
+   check(errs.length === 0, `no page errors${errs.length ? ': ' + errs[0] : ''}`);
+   await b.close();
+ } finally { server.kill(); }
 diff --git a/test/settings.ts b/test/settings.ts
 index f8621c4..7d50be4 100644
 --- a/test/settings.ts
@@ -3352,3 +4258,37 @@ index f8621c4..7d50be4 100644
      check(saved.textSkip === !before && saved.keyboardInputMap?.[74] === 'ok', 'game values and key bindings are saved in the same file');
  
      // ---- 11. reload: values come back; enable skipSplash and see the boot get faster
+diff --git a/types/omori-mod.d.ts b/types/omori-mod.d.ts
+index 9dc6118..e20bb96 100644
+--- a/types/omori-mod.d.ts
++++ b/types/omori-mod.d.ts
+@@ -52,28 +52,7 @@ interface OmoriModApi {
+     has(id: string): boolean;
+     /** fire a custom event for other mods to subscribe to with scope().on() */
+     emit(event: string, ...args: unknown[]): void;
+-    /** Named snapshots of the whole running game (same as the debug panel's Checkpoints tab). Restoring first saves an automatic undo checkpoint. */
+-    readonly checkpoints: {
+-        capture(name: string): Promise<{ id: string; name: string }>;
+-        list(): Promise<{ id: string; name: string; time: number; auto: boolean; beat: boolean; forged: string | null; provided: string | null; map: number }[]>;
+-        restore(nameOrId: string): Promise<void>;
+-        diff(nameOrId: string): Promise<{ section: string; key: string; from: unknown; to: unknown }[]>;
+-        remove(nameOrId: string): Promise<void>;
+-        /** What differs between two checkpoints (or a checkpoint and the running game), as a patch { switches, variables } keyed by id. */
+-        compare(a: string, b?: string): Promise<{ switches?: Record<string, boolean>; variables?: Record<string, number> }>;
+-        /** A new checkpoint made by copying `base` and changing switches/variables (keys are ids or exact names). Tagged forged; the base is untouched. */
+-        forge(base: string, patch: { switches?: Record<string, boolean>; variables?: Record<string, number> }, name: string): Promise<{ id: string; name: string; forged: string }>;
+-        /** Where the game is in the story, which route the flags say it is on, and how well this profile's checkpoints cover the story. */
+-        readonly routes: {
+-            current(): { last: { id: number; name: string } | null; spineOn: number; phase: string[]; endings: string[]; counters: Record<string, number>; savedBasil: boolean; world: string | null; route: 'true' | 'neutral' | 'undecided'; text: string };
+-            coverage(): Promise<{ recorded: number; total: number; missing: string[] } | null>;
+-            lines(): Promise<{ route: string; checkpoints: { id: string; name: string; at: string }[] }[]>;
+-        };
+-        /** Automatic story-beat recording (the Gameplay setting). Pass a boolean to change it; returns the current value. */
+-        recordBeats(v?: boolean): boolean;
+-        /** Offer a checkpoint file (as exported by the panel) to the player; call from a mod script. Use the panel's "script" button to generate the call. */
+-        register(name: string, data: unknown): void;
+-    };
++
+ }
+ 
+ declare const OmoriMod: OmoriModApi;
