@@ -166,7 +166,7 @@ index f8d1a89..7915c1c 100644
  
  export interface DisplayOptions {
      /** Max internal render multiplier (1..4). `?q=` in the URL overrides it. */
-@@ -126,40 +124,15 @@ export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): voi
+@@ -126,40 +124,22 @@ export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): voi
      };
  
      // ---- bar colour ----------------------------------------------------------------------
@@ -176,6 +176,13 @@ index f8d1a89..7915c1c 100644
      bars.forEach(el => Object.assign(el.style, { position: 'fixed', zIndex: '0', pointerEvents: 'none' }));
      document.body.prepend(...bars);
      document.body.style.background = '#000';
++    document.documentElement.style.setProperty('background-color', '#000', 'important');
++    document.documentElement.style.setProperty('min-height', '100%', 'important');
++    document.body.style.setProperty('background-color', '#000', 'important');
++    document.body.style.setProperty('margin', '0', 'important');
++    document.body.style.setProperty('min-height', '100vh', 'important');
++    document.body.style.setProperty('min-height', '100dvh', 'important');
++    document.body.style.setProperty('overflow', 'hidden', 'important');
  
 -    const mkProbe = (w: number, h: number) => {
 -        const c = document.createElement('canvas');
