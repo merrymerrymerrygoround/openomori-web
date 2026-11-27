@@ -2,15 +2,17 @@ diff --git a/build.ts b/build.ts
 index df9e662..c368dca 100644
 --- a/build.ts
 +++ b/build.ts
-@@ -1,4 +1,3 @@
+@@ -1,5 +1,4 @@
  export {};
 -import { copyFileSync, mkdirSync } from 'node:fs';
+ // Bundles the browser client (shim + display layer + loader) into dist/app.js.
  const result = await Bun.build({
      entrypoints: ['src/client/entry.ts'],
-@@ -31,6 +30,18 @@ if (!sw.success) {
+@@ -31,7 +29,18 @@ if (!sw.success) {
  }
  console.log(`built dist/sw.js (${(sw.outputs[0]!.size / 1024).toFixed(0)} KB)`);
  
+-// The archive reader for .7z / .rar / .tar.* mods: libarchive compiled to WebAssembly, loaded on demand by the page.
 -mkdirSync('dist/vendor/libarchive', { recursive: true });
 -for (const f of ['worker-bundle.js', 'libarchive.wasm']) copyFileSync(`node_modules/libarchive.js/dist/${f}`, `dist/vendor/libarchive/${f}`);
 -console.log('copied libarchive worker + wasm to dist/vendor/libarchive');
@@ -57,7 +59,7 @@ index f858c27..0802bd6 100644
      <meta name="color-scheme" content="dark">
      <link rel="icon" href="icon/icon.png" type="image/png">
      <link rel="preload" href="fonts/gamefont.css" as="style">
-@@ -14,6 +16,6 @@
+@@ -14,6 +18,6 @@
      </style>
  </head>
  <body>
@@ -83,7 +85,7 @@ index fe97c0b..c226a14 100644
  
  const LIBS = ['pixi', 'pixi-tilemap', 'pixi-picture', 'lz-string', 'iphone-inline-video.browser'].map(n => `js/libs/${n}.js`);
  const CORE = ['rpg_core', 'rpg_managers', 'rpg_objects', 'rpg_scenes', 'rpg_sprites', 'rpg_windows', 'plugins'].map(n => `js/${n}.js`);
-@@ -36,41 +33,19 @@ async function warmCache(): Promise<void> {
+@@ -36,42 +30,19 @@ async function warmCache(): Promise<void> {
  
  export async function boot(): Promise<void> {
      const mark = (n: string) => performance.mark(`omori:${n}`);
@@ -91,31 +93,32 @@ index fe97c0b..c226a14 100644
      await shimReady; mark("shim-ready");
 -    installModUi();
 -    await initMods(String(nw.App.argv[0] ?? '').replace(/^--/, '')); mark("mods");
--    await runPhase('early');
+-    await runPhase('early');               // mod scripts that must run before any game code
 -    const warm = warmCache();
 +    const warm = Promise.all([warmCache(), prefetchWebFiles()]).then(() => {});
      for (const src of [...LIBS, ...CORE]) await loadScript(src);
      mark("core-scripts");
      await warm; mark("cache-warm");
 -    await runPhase('pre-plugins');
--    patchPlugins();
-     PluginManager.setup($plugins);
+-    patchPlugins();                  // mods' own plugins + plugin_parameters, after their pre-injection scripts
+     PluginManager.setup($plugins);   // plugins (and their Graphics overrides) load synchronously here
      mark("plugins");
 -    installGameEvents();
      installCheckpointApi();
      installBeatRecorder();
--    await runPhase('post-plugins');
-     installDisplay();
+-    await runPhase('post-plugins');  // mod scripts: the game's classes exist, nothing has started
+     installDisplay();                // must run after plugins so it wins over YEP_CoreEngine
      installCutsceneLayout();
      installDebug();
--    installSettings();
+-    installSettings();               // replaces the game's options screens; after plugins so ConfigManager is final
 +    if (new URLSearchParams(location.search).get('newsettings') === '1') installSettings();
      SceneManager.run(Scene_Boot);
      mark("run");
 -    await runPhase('ready');
 -    startHotReload();
- }
+-}
 -
+-/** `?hot=1`: reload when the dev ./mods folder changes (for authors iterating on a mod). */
 -function startHotReload() {
 -    if (new URLSearchParams(location.search).get('hot') !== '1') return;
 -    let last: number | null = null;
@@ -124,20 +127,22 @@ index fe97c0b..c226a14 100644
 -            const v = (await (await fetch('/__mods/version', { cache: 'no-store' })).json()).version as number;
 -            if (last !== null && v !== last) location.reload();
 -            last = v;
--        } catch {  }
+-        } catch { /* server restarting */ }
 -    }, 1000);
--}
+ }
 diff --git a/src/client/checkpoints.ts b/src/client/checkpoints.ts
 index dfcf8e3..ce3087b 100644
 --- a/src/client/checkpoints.ts
 +++ b/src/client/checkpoints.ts
-@@ -4,5 +4,4 @@
+@@ -4,7 +4,6 @@
+ // Also here: the "story beat" recorder (auto-checkpoints the first time each story switch turns on) and
+ // checkpoints shipped by mods (OmoriMod.checkpoints.register).
  import { diffDigests, makeDigest, type Change, type Digest } from './checkpoint-core.ts';
 -import { getActiveProfile } from './mods/store.ts';
  import { portValue, register } from './settings/registry.ts';
  import type { StoryIndex } from '../mods/storyscan.ts';
  import { ENDING_FLAGS, PHASE_FLAGS, SPINE_SWITCH, coverage, describe, routeKey, routeLabel, signature } from './story-model.ts';
-@@ -30,8 +29,7 @@ let dbPromise: Promise<IDBDatabase> | null = null;
+@@ -30,8 +28,7 @@ let dbPromise: Promise<IDBDatabase> | null = null;
  async function db(): Promise<IDBDatabase> {
      if (!dbPromise) {
          dbPromise = (async () => {
@@ -151,14 +156,24 @@ diff --git a/src/client/display.ts b/src/client/display.ts
 index f8d1a89..7915c1c 100644
 --- a/src/client/display.ts
 +++ b/src/client/display.ts
-@@ -12,6 +12,5 @@
+@@ -11,8 +11,7 @@
+ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
  
- const MAX_WIDE_WIDTH = 1120;
- const EDGE_EVERY = 4;
--const STEPS = 12;
+ const MAX_WIDE_WIDTH = 1120;  // ~21:9 at 480px tall; wider windows get bars rather than an absurd view
+-const EDGE_EVERY = 4;         // sample bar colours every Nth rendered frame (~15 Hz)
+-const STEPS = 12;             // colour stops sampled along each bar's edge
++const EDGE_EVERY = 4;
  
  export interface DisplayOptions {
-@@ -130,32 +129,10 @@ export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): voi
+     /** Max internal render multiplier (1..4). `?q=` in the URL overrides it. */
+@@ -126,40 +124,15 @@ export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): voi
+     };
+ 
+     // ---- bar colour ----------------------------------------------------------------------
+-    // Whatever the canvas doesn't cover is filled with the picture's own edge, sampled as a gradient
+-    // along the edge (a white title screen gets white bars, a dark scene gets dark bars, no seams).
+     const bars = [document.createElement('div'), document.createElement('div')] as const;
+     bars.forEach(el => Object.assign(el.style, { position: 'fixed', zIndex: '0', pointerEvents: 'none' }));
      document.body.prepend(...bars);
      document.body.style.background = '#000';
  
@@ -171,6 +186,7 @@ index f8d1a89..7915c1c 100644
 -    };
 -    const probeV = mkProbe(1, STEPS), probeH = mkProbe(STEPS, 1);
 -
+-    /** STEPS colours along one edge of the rendered picture (each a small area average). */
 -    function edgeColors(src: HTMLCanvasElement, side: 'left' | 'right' | 'top' | 'bottom'): string[] {
 -        const sw = src.width, sh = src.height, k = 2 * G._res;
 -        const vertical = side === 'left' || side === 'right';
@@ -188,10 +204,10 @@ index f8d1a89..7915c1c 100644
  
      function paintBars() {
 -        const src: HTMLCanvasElement = G._canvas;
-         const horizontal = innerWidth / innerHeight >= G._width / G._height;
+         const horizontal = innerWidth / innerHeight >= G._width / G._height; // bars left/right vs top/bottom
          const cw = G._width * G._realScale, ch = G._height * G._realScale;
-         const gx = (innerWidth - cw) / 2, gy = (innerHeight - ch) / 2;
-@@ -167,13 +144,11 @@ export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): voi
+         const gx = (innerWidth - cw) / 2, gy = (innerHeight - ch) / 2;       // the bars are what's outside the canvas
+@@ -167,13 +116,11 @@ export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): voi
          if (horizontal) {
              place(first, 0, 0, Math.ceil(gx) + 1, innerHeight);
              place(second, Math.floor(gx + cw) - 1, 0, innerWidth - Math.floor(gx + cw) + 1, innerHeight);
@@ -211,8 +227,8 @@ diff --git a/src/client/entry.ts b/src/client/entry.ts
 index 95ea58c..9ac58a9 100644
 --- a/src/client/entry.ts
 +++ b/src/client/entry.ts
-@@ -1,7 +1,55 @@
--import './shim/index.ts';
+@@ -1,7 +1,53 @@
+-import './shim/index.ts'; // side effects first: defines require/process/nw before any game code
 -import { boot } from './boot.ts';
 +import '../web/base.ts';
 +import { runDiagnostics } from '../web/diag.ts';
@@ -232,7 +248,6 @@ index 95ea58c..9ac58a9 100644
 +    const report = await runDiagnostics().catch(x => 'diagnostics failed: ' + String(x));
 +    document.body.textContent = text + '\n\n--- report ---\n' + report;
 +}
-+
 +try {
 +    await ensureGame();
 +    if (new URLSearchParams(location.search).has('diag')) {
@@ -250,7 +265,6 @@ index 95ea58c..9ac58a9 100644
 +        installTouchControls();
 +    }
 +} catch (e) { void fail(e); }
-+
 +function showFailedFilesOnGameError(): void {
 +    const g = globalThis as any;
 +    const wrap = () => {
@@ -278,9 +292,11 @@ deleted file mode 100644
 index f8150f6..0000000
 --- a/src/client/mods/api.ts
 +++ /dev/null
-@@ -1,197 +0,0 @@
+@@ -1,205 +0,0 @@
 -import { isLoaded, portValue, register, type Choice } from '../settings/registry.ts';
 -
+-// window.OmoriMod: the API mod scripts program against, plus error capture that blames the right mod.
+-// Everything a mod does through this API is wrapped so one broken mod logs an error instead of killing the game.
 -
 -export interface ErrorEntry { mod: string; message: string; stack?: string; time: number; count: number; level: 'error' | 'warn' }
 -type Listener = (...args: any[]) => void;
@@ -292,7 +308,7 @@ index f8150f6..0000000
 -const errorSubs = new Set<() => void>();
 -export const onErrors = (fn: () => void) => { errorSubs.add(fn); return () => errorSubs.delete(fn); };
 -
--let current: { id: string; file: string } | null = null;
+-let current: { id: string; file: string } | null = null; // script being executed right now
 -export const setCurrent = (c: typeof current) => { current = c; };
 -
 -const events = new Map<string, Set<{ fn: Listener; mod: string }>>();
@@ -300,10 +316,11 @@ index f8150f6..0000000
 -let commandsInstalled = false;
 -const hookErrors = new WeakMap<object, number>();
 -
+-/** Which mod does this stack trace / file name belong to? */
 -export const blame = (text?: string): string | null => MOD_URL.exec(text ?? '')?.[1] ?? null;
 -
 -function send(level: string, mod: string, message: string) {
--    try { void fetch('/__mods/log', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ level, mod, message }), keepalive: true }); } catch {  }
+-    try { void fetch('/__mods/log', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ level, mod, message }), keepalive: true }); } catch { /* offline */ }
 -}
 -
 -export function report(mod: string, err: unknown, context = '', level: 'error' | 'warn' = 'error') {
@@ -374,6 +391,7 @@ index f8150f6..0000000
 -    | { id: string; label: string; help?: string; type: 'action'; button: string; run(): void };
 -
 -export interface ScopedApi {
+-    /** Add a setting to the Settings screen (Mods tab). Stored with the player's other settings, per profile. */
 -    settings: { add<T extends boolean | number | string>(def: SettingDef): { get(): T; set(v: T): void } };
 -    id: string;
 -    log(...a: unknown[]): void;
@@ -382,6 +400,7 @@ index f8150f6..0000000
 -    on(event: string, fn: Listener): () => void;
 -    hook(target: any, method: string, fn: (orig: (...a: any[]) => any, ...args: any[]) => any): () => void;
 -    command(name: string, fn: (args: string[], interp: any) => void): void;
+-    /** Run `fn`; if it throws, report it against this mod and carry on. */
 -    safe<T>(fn: () => T, context?: string): T | undefined;
 -}
 -
@@ -412,7 +431,7 @@ index f8150f6..0000000
 -                if (def.type === 'toggle') register({ ...base, control: { type: 'toggle', get: v.get, set: v.set } });
 -                else if (def.type === 'slider') register({ ...base, control: { type: 'slider', min: def.min, max: def.max, step: def.step ?? 1, unit: def.unit, get: v.get, set: v.set } });
 -                else register({ ...base, control: { type: 'choice', options: def.options, get: v.get, set: v.set } });
--                if (isLoaded()) guard(def.onChange)(v.get());
+-                if (isLoaded()) guard(def.onChange)(v.get()); // saved value already known: apply it now
 -                return v as any;
 -            },
 -        },
@@ -425,6 +444,7 @@ index f8150f6..0000000
 -export const OmoriMod = {
 -    apiVersion: 1,
 -    mods: modInfo,
+-    /** API bound to the calling mod (call it at the top of your script so errors are attributed to you). */
 -    scope(id?: string): ScopedApi {
 -        const mod = id ?? current?.id ?? blame(new Error().stack) ?? '(unknown)';
 -        return scoped(mod);
@@ -433,6 +453,7 @@ index f8150f6..0000000
 -    has: (id: string) => modInfo.some(m => m.id === id && m.enabled),
 -};
 -
+-/** Game-level events mods can subscribe to with scope().on(...). Installed once the game's plugins have loaded. */
 -export function installGameEvents() {
 -    const g = globalThis as any;
 -    const wrap = (target: any, method: string, event: string, pick: (...a: any[]) => unknown[]) => {
@@ -451,6 +472,7 @@ index f8150f6..0000000
 -    wrap(g.DataManager, 'makeSaveContents', 'game:save', () => []);
 -}
 -
+-/** Global error capture: blame the mod named in the stack, otherwise log it as a game error. */
 -export function installErrorCapture() {
 -    window.addEventListener('error', ev => {
 -        const mod = blame(ev.filename) ?? blame(ev.error?.stack) ?? current?.id ?? '(game)';
@@ -470,7 +492,7 @@ index f8150f6..0000000
 -            try {
 -                const text = args.map(a => (a instanceof Error ? a.stack ?? a.message : typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
 -                if (!text.startsWith('[mod:')) send(lvl, blame(text) ?? '(game)', text.slice(0, 2000));
--            } catch {  } finally { busy = false; }
+-            } catch { /* never let logging break the game */ } finally { busy = false; }
 -        };
 -    }
 -}
@@ -481,7 +503,10 @@ deleted file mode 100644
 index cfe794d..0000000
 --- a/src/client/mods/archive.ts
 +++ /dev/null
-@@ -1,64 +0,0 @@
+@@ -1,70 +0,0 @@
+-// Reads any common archive a player might download a mod as: zip, 7z, rar (v4 and v5), tar, tar.gz/.tgz, tar.bz2, tar.xz.
+-// Zip is handled in-process (fast, no download). Everything else goes through libarchive compiled to WebAssembly,
+-// loaded on demand from /vendor/libarchive/ (see build.ts), so players who only use zips never pay for it.
 -import { unzipSync } from 'fflate';
 -import { Archive } from 'libarchive.js';
 -
@@ -494,7 +519,7 @@ index cfe794d..0000000
 -function init() {
 -    if (ready) return;
 -    ready = true;
--    Archive.init({ workerUrl: '/vendor/libarchive/worker-bundle.js' });
+-    Archive.init({ workerUrl: '/vendor/libarchive/worker-bundle.js' }); // the wasm file sits next to the worker
 -}
 -
 -export class ArchiveError extends Error {}
@@ -510,10 +535,13 @@ index cfe794d..0000000
 -}
 -
 -export interface ReadOptions {
+-    /** called with "what we're doing" for long extractions */
 -    onProgress?(message: string): void;
+-    /** asked when the archive is password protected; return null to give up */
 -    askPassword?(): string | null;
 -}
 -
+-/** All files in the archive as path -> bytes. Throws ArchiveError with a message fit to show the user. */
 -export async function readArchive(file: File, opts: ReadOptions = {}): Promise<Record<string, Uint8Array>> {
 -    const head = new Uint8Array(await file.slice(0, 600).arrayBuffer());
 -    const fmt = sniff(head);
@@ -551,7 +579,10 @@ deleted file mode 100644
 index 0454cdc..0000000
 --- a/src/client/mods/compat.ts
 +++ /dev/null
-@@ -1,102 +0,0 @@
+@@ -1,109 +0,0 @@
+-// A small stand-in for the parts of OneLoader's `$modLoader` that mods' scripts and the plugin list rely on, so
+-// mods written for OneLoader find the objects they expect. It is deliberately narrow: no virtual file system, no
+-// Node access. A script that reaches for more fails with an error attributed to its mod, not a crash.
 -import { applyJsonPatch } from '../../mods/patch.ts';
 -import type { LoadedMod } from '../../mods/engine.ts';
 -import type { PluginRule } from '../../mods/manifest.ts';
@@ -580,12 +611,14 @@ index 0454cdc..0000000
 -
 -const lower = (s: string) => s.toLowerCase();
 -
+-/** Names of plugins a mod adds (or, for plugin deltas, edits) as listed by OneLoader: lowercase, no extension. */
 -const pluginNameOf = (target: string) => lower(target.slice(target.lastIndexOf('/') + 1).replace(/\.[^.]*$/, ''));
 -
 -export function installModLoaderShim(mods: LoadedMod[]): ModLoaderShim {
 -    const pluginLocks = new Set<string>();
 -    const pluginOrderingRules = new Map<string, OrderingRule>();
 -
+-    // plugin deltas first (they lock the plugin and mean "append at the end"), then the plugins mods ship
 -    for (const m of mods) {
 -        for (const e of m.edits) {
 -            if (e.kind === 'append' && /^js\/plugins\//i.test(e.target)) {
@@ -627,8 +660,9 @@ index 0454cdc..0000000
 -    return shim;
 -}
 -
--const AsyncFunction = Object.getPrototypeOf(async function () {  }).constructor as new (...args: string[]) => (...a: unknown[]) => Promise<unknown>;
+-const AsyncFunction = Object.getPrototypeOf(async function () { /* */ }).constructor as new (...args: string[]) => (...a: unknown[]) => Promise<unknown>;
 -
+-/** Run an `asyncExec` script the way OneLoader does: an async function body with `params`, or a module exporting an async function. */
 -export async function runExec(mod: LoadedMod, file: string, style: 'eval' | 'require', params: Record<string, unknown>): Promise<void> {
 -    const code = new TextDecoder().decode(mod.tree.read(file)) + `\n//# sourceURL=omori-mod://${mod.id}/${file}`;
 -    try {
@@ -644,6 +678,7 @@ index 0454cdc..0000000
 -    }
 -}
 -
+-/** plugin_parameters: JSON patches over a plugin's parameter object, as OneLoader applies them. */
 -export function applyPluginParameters(mods: LoadedMod[], plugins: { name: string; parameters: Record<string, unknown> }[]) {
 -    for (const m of mods) {
 -        for (const [name, patch] of Object.entries(m.pluginParameters)) {
@@ -659,7 +694,13 @@ deleted file mode 100644
 index b3ea150..0000000
 --- a/src/client/mods/olid.ts
 +++ /dev/null
-@@ -1,129 +0,0 @@
+@@ -1,142 +0,0 @@
+-// Image deltas (.olid): small patch files that change parts of a game image, used by sprite and portrait fix mods.
+-// The format is OneLoader's: a header (magic, size, per-patch salt) and a zlib-compressed stream of 16x16 pixel tiles,
+-// each decoded by a small WebAssembly routine. That routine ships inside OneLoader packs, so we use the player's own
+-// copy (kept in the library when a pack is imported) instead of bundling it.
+-//
+-// Patched images are cached by what went in, so a pack with ~130 patched images is only processed once.
 -import { unzipSync, unzlibSync } from 'fflate';
 -import type { LoadedMod, ModEngine } from '../../mods/engine.ts';
 -import { report } from './api.ts';
@@ -669,6 +710,7 @@ index b3ea150..0000000
 -
 -let decoder: Promise<BitDiff | null> | null = null;
 -
+-/** Loads the decoder from the saved pack files; null when no pack with it has been imported. */
 -function loadDecoder(): Promise<BitDiff | null> {
 -    return (decoder ??= (async () => {
 -        const zip = await getSupport('imagediff2');
@@ -693,6 +735,7 @@ index b3ea150..0000000
 -function parseOlid(bytes: Uint8Array, mod: string): Delta | null {
 -    if (bytes.length < 26) return null;
 -    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+-    // OneLoader only rejects a file when BOTH checks fail; same here so odd-but-working files still load
 -    if (dv.getUint32(0) !== 0xfeffd808 && dv.getUint32(4) !== 0xdd21) return null;
 -    return { salt: hex(bytes.slice(14, 22)), stream: bytes.slice(26), width: dv.getUint32(6), height: dv.getUint32(10), mod };
 -}
@@ -720,7 +763,7 @@ index b3ea150..0000000
 -            const src = bitmap.width < tx * e || bitmap.height < ty * e ? new ArrayBuffer(e * e * 4) : ctx.getImageData(tx * e, ty * e, e, e).data.buffer;
 -            const out = dec.apply_diff(new Uint32Array(src), tile);
 -            const pixels = new Uint8ClampedArray(new ArrayBuffer(e * e * 4));
--            pixels.set(new Uint8Array(out.buffer, out.byteOffset, e * e * 4));
+-            pixels.set(new Uint8Array(out.buffer, out.byteOffset, e * e * 4)); // copy out of wasm memory
 -            ctx.putImageData(new ImageData(pixels, e, e), tx * e, ty * e);
 -        }
 -    }
@@ -736,6 +779,10 @@ index b3ea150..0000000
 -
 -export interface OlidResult { applied: number; failed: number; missingDecoder: boolean; generated: Record<string, Uint8Array> }
 -
+-/**
+- * Apply every active mod's image deltas. Results are registered on the engine (so the page and the service worker can serve
+- * them) and returned for persistence. Never throws: a bad delta is reported against its mod and that image stays as it was.
+- */
 -export async function applyImageDeltas(engine: ModEngine, onProgress?: (done: number, total: number, name: string) => void): Promise<OlidResult> {
 -    const result: OlidResult = { applied: 0, failed: 0, missingDecoder: false, generated: {} };
 -    const jobs = new Map<string, { target: string; items: { mod: LoadedMod; source: string }[] }>();
@@ -764,9 +811,10 @@ index b3ea150..0000000
 -                if (d) deltas.push(d); else report(it.mod.id, new Error(`${it.source} is not a valid image delta`), '', 'warn');
 -            }
 -            if (!deltas.length) continue;
--            deltas.sort((a, b) => (a.salt > b.salt ? 1 : -1));
+-            deltas.sort((a, b) => (a.salt > b.salt ? 1 : -1)); // OneLoader applies in salt order
 -
 -            const rpg = target.replace(/\.png$/i, '.rpgmvp');
+-            // the base is whatever the image is by now: a mod's replacement if there is one, otherwise the game's own file
 -            let encBase = engine.hasEdits(rpg) ? engine.resolve(rpg, () => null) : null;
 -            if (!encBase) {
 -                const r = await fetch(`/${rpg.split('/').map(encodeURIComponent).join('/')}?__vanilla=1`, { cache: 'no-store' });
@@ -794,7 +842,11 @@ deleted file mode 100644
 index cf54f86..0000000
 --- a/src/client/mods/plugins.ts
 +++ /dev/null
-@@ -1,44 +0,0 @@
+@@ -1,51 +0,0 @@
+-// Adds the plugins that mods ship to the game's plugin list ($plugins), following OneLoader's ordering rules:
+-//   plugins_ordered {"name": {"at": N | "after": "Other", "weight": W}} places a plugin at a position;
+-//   anything without a position goes after the game's own plugins (positive weights first, then plain, then negative).
+-// Replacing a plugin the game already has needs no list change: the file simply changes.
 -import type { LoadedMod } from '../../mods/engine.ts';
 -import { applyPluginParameters, type ModLoaderShim } from './compat.ts';
 -
@@ -802,10 +854,12 @@ index cf54f86..0000000
 -const lower = (s: string) => s.toLowerCase();
 -const modded = (name: string, weight?: number): Entry => ({ name, status: true, description: 'Modded plugin', parameters: {}, ...(weight === undefined ? {} : { _w: weight }) });
 -
+-/** Mutates the game's `$plugins` array in place. Call after `pre-plugins` scripts and before PluginManager.setup. */
 -export function patchPluginList(plugins: Entry[], mods: LoadedMod[], shim: ModLoaderShim): { added: string[] } {
--    const gameSupplied = plugins.map(p => lower(p.name));
+-    const gameSupplied = plugins.map(p => lower(p.name)); // after scripts: a script may already have inserted a plugin itself
 -    const added: string[] = [];
 -
+-    // 1. plugins with an explicit position
 -    const injections: Entry[][] = Array.from({ length: plugins.length + 1 }, () => []);
 -    for (const [name, { rule }] of shim.pluginOrderingRules) {
 -        if (gameSupplied.includes(name)) continue;
@@ -825,11 +879,12 @@ index cf54f86..0000000
 -        plugins.splice(i, 0, ...injections[i]!);
 -    }
 -
+-    // 2. everything else goes after the game's plugins, by weight
 -    const neg: Entry[] = [], mid: Entry[] = [], pos: Entry[] = [];
 -    for (const name of shim.pluginLocks) {
 -        const rule = shim.pluginOrderingRules.get(name)?.rule;
 -        if (!rule || gameSupplied.includes(name) || (rule.at ?? -1) !== -1) continue;
--        if (plugins.some(p => lower(p.name) === name)) continue;
+-        if (plugins.some(p => lower(p.name) === name)) continue; // a script placed it
 -        const w = rule.weight ?? 0;
 -        (w < 0 ? neg : w > 0 ? pos : mid).push(modded(name, w));
 -        added.push(name);
@@ -844,7 +899,9 @@ deleted file mode 100644
 index 3f4aeda..0000000
 --- a/src/client/mods/runtime.ts
 +++ /dev/null
-@@ -1,151 +0,0 @@
+@@ -1,165 +0,0 @@
+-// Mod runtime: builds the engine from installed mods, hooks it into the fs shim and service worker,
+-// and runs mod scripts at the right point of boot.
 -import { ModEngine, assetKeyFromSystem, type Diagnostic, type LoadedMod } from '../../mods/engine.ts';
 -import type { ClientScript } from '../../mods/manifest.ts';
 -import { zipTreeFromBytes } from '../../mods/vfs.ts';
@@ -860,14 +917,17 @@ index 3f4aeda..0000000
 -let key = '';
 -export const engine = new ModEngine(() => key, (d: Diagnostic) => {
 -    if (d.level === 'info') return;
+-    // Problems found while loading mods surface in the same panel and log as runtime errors.
 -    report(d.mod ?? '(mods)', new Error(d.message), '', d.level === 'warn' ? 'warn' : 'error');
 -});
+-/** The mod library (every installed mod) and the profile this session runs as. */
 -export let records: ModRecord[] = [];
 -export let profile: Profile | null = null;
 -let shim: ModLoaderShim | null = null;
 -
 -const hex = (b: Uint8Array) => Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
 -
+-/** A small status line during startup work that can take a while (patching many images). */
 -function bootStatus() {
 -    const el = document.createElement('div');
 -    el.setAttribute('style', 'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:2147483200;background:#000c;color:#fff;font:13px system-ui,sans-serif;padding:8px 14px;border-radius:6px;pointer-events:none');
@@ -875,14 +935,16 @@ index 3f4aeda..0000000
 -    return { set: (t: string) => { el.textContent = t; }, done: () => el.remove() };
 -}
 -
+-/** Images and audio are stored with RPG Maker's encryption; replacing one means encoding it with the game's own asset key. */
 -async function prepareAssetKey(): Promise<void> {
 -    const r = await fetch('/data/System.KEL', { cache: 'no-store' });
 -    if (!r.ok) throw new Error('could not read the game\'s System data');
 -    const system = JSON.parse(new TextDecoder().decode(engine.decrypt(new Uint8Array(await r.arrayBuffer()))));
 -    engine.assetKey = assetKeyFromSystem(system);
--    await setMeta('assetKey', hex(engine.assetKey));
+-    await setMeta('assetKey', hex(engine.assetKey)); // the service worker has no game key, so it reads this
 -}
 -
+-/** Load installed mods and plug them into the game's file layer. Never throws: a broken mod store means "no mods". */
 -export async function initMods(gameKey: string): Promise<void> {
 -    key = gameKey;
 -    try {
@@ -931,6 +993,7 @@ index 3f4aeda..0000000
 -    await syncServiceWorker();
 -}
 -
+-/** Images, audio and plain scripts bypass the fs shim, so a service worker serves the mod versions. */
 -async function syncServiceWorker(safe = false): Promise<void> {
 -    if (!('serviceWorker' in navigator)) {
 -        if (engine.hasAssetEdits()) report('(mods)', new Error('this browser has no service worker support; mods that replace images/audio will not apply'), '', 'warn');
@@ -964,12 +1027,17 @@ index 3f4aeda..0000000
 -    }
 -}
 -
+-/** Parameters OneLoader passes to scripts at each stage. */
 -function paramsFor(phase: ClientScript['phase']): Record<string, unknown> {
 -    const g = globalThis as any;
 -    if (phase === 'pre-plugins') return { PluginManager: g.PluginManager, $plugins: g.$plugins };
 -    return { knownMods: shim?.knownMods ?? new Map(), $modLoader: shim };
 -}
 -
+-/**
+- * Run every active mod's scripts for a boot phase, in load order (OneLoader scripts also in run-at order).
+- * A throwing script is reported against its mod and skipped.
+- */
 -export async function runPhase(phase: ClientScript['phase']): Promise<void> {
 -    const items: { mod: LoadedMod; script: NonNullable<LoadedMod['scripts']>[number]; at: number }[] = [];
 -    engine.activeMods().forEach((mod, at) => mod.scripts.filter(s => s.phase === phase).forEach(script => items.push({ mod, script, at })));
@@ -981,7 +1049,7 @@ index 3f4aeda..0000000
 -            const el = document.createElement('script');
 -            el.textContent = `${code}\n//# sourceURL=omori-mod://${m.id}/${s.file}`;
 -            setCurrent({ id: m.id, file: s.file });
--            document.head.appendChild(el);
+-            document.head.appendChild(el); // runs synchronously; errors reach the window error handler, attributed via sourceURL
 -            el.remove();
 -        } catch (e) {
 -            report(m.id, e, `script ${s.file} (${phase})`);
@@ -989,6 +1057,7 @@ index 3f4aeda..0000000
 -    }
 -}
 -
+-/** Add mod-provided plugins to the game's plugin list and apply plugin_parameters. Run after `pre-plugins` scripts. */
 -export function patchPlugins(): void {
 -    if (!shim) return;
 -    try {
@@ -1001,11 +1070,18 @@ deleted file mode 100644
 index 6316bb3..0000000
 --- a/src/client/mods/store.ts
 +++ /dev/null
-@@ -1,223 +0,0 @@
+@@ -1,249 +0,0 @@
+-// Persistent state in IndexedDB (shared by the page and the service worker, same origin):
+-//   mods      the library of installed mod zips (a mod can be used by several profiles)
+-//   profiles  Minecraft-launcher-style profiles: which mods are on, and which save storage to use
+-//   backups   automatic and manual snapshots of a profile's saves
+-//   meta      the active profile id
+-// Each profile's game saves live in their own database ("omori-fs" for the original profile, so existing
+-// saves are untouched), which is what makes trying a mod safe.
 -import { unzipSync, zipSync } from 'fflate';
 -
 -export interface ModRecord {
--    key: string;
+-    key: string;          // "browser:<id>" | "server:<label>"
 -    label: string;
 -    origin: 'browser' | 'server';
 -    zip: Uint8Array;
@@ -1016,8 +1092,11 @@ index 6316bb3..0000000
 -    id: string;
 -    name: string;
 -    created: number;
+-    /** keys of the mods switched on in this profile */
 -    enabled: string[];
+-    /** also enable every mod from the dev ./mods folder (for mod authors) */
 -    devAuto: boolean;
+-    /** IndexedDB database holding this profile's saves */
 -    fsDb: string;
 -}
 -
@@ -1049,19 +1128,24 @@ index 6316bb3..0000000
 -    try { return await done(fn(db.transaction(store, mode).objectStore(store))); } finally { db.close(); }
 -}
 -
+-// ---------------------------------------------------------------- mod library
 -const SUPPORT_PREFIX = 'support:';
+-/** Installed mods (support files, like the image-patch decoder, share the store but are not mods). */
 -export const listMods = async () => ((await tx('mods', 'readonly', s => s.getAll())) as ModRecord[]).filter(r => !r.key.startsWith(SUPPORT_PREFIX));
 -export const putMod = (rec: ModRecord) => tx('mods', 'readwrite', s => s.put(rec));
 -
+-/** Helper files a pack ships (OneLoader's image decoder). Kept so image deltas keep working when mods are installed one by one. */
 -export const putSupport = (name: string, zip: Uint8Array) => putMod({ key: SUPPORT_PREFIX + name, label: name, origin: 'browser', zip, stamp: String(zip.length) });
 -export async function getSupport(name: string): Promise<Uint8Array | null> {
 -    const rec = (await tx('mods', 'readonly', s => s.get(SUPPORT_PREFIX + name))) as ModRecord | undefined;
 -    return rec?.zip ?? null;
 -}
 -
+-// ---------------------------------------------------------------- small shared state
 -export const getMeta = <T>(key: string) => tx('meta', 'readonly', s => s.get(key)) as Promise<T | undefined>;
 -export const setMeta = (key: string, value: unknown) => tx('meta', 'readwrite', s => s.put(value, key));
 -
+-/** Images patched at startup, stored so the service worker (a separate context) can serve them. Replaced wholesale on every boot. */
 -export async function replaceGenerated(files: Record<string, Uint8Array>): Promise<void> {
 -    const db = await open();
 -    try {
@@ -1085,6 +1169,7 @@ index 6316bb3..0000000
 -    return out;
 -}
 -
+-/** Cache of finished image patches, keyed by what went in, so a 130-image pack is only patched once. */
 -export async function cacheGet(key: string): Promise<Uint8Array | null> {
 -    const v = (await tx('olidcache', 'readonly', s => s.get(key))) as ArrayBuffer | undefined;
 -    return v ? new Uint8Array(v) : null;
@@ -1096,6 +1181,7 @@ index 6316bb3..0000000
 -    for (const p of await listProfiles()) if (p.enabled.includes(key)) await saveProfile({ ...p, enabled: p.enabled.filter(k => k !== key) });
 -}
 -
+-/** Mirror the dev ./mods folder into the library (adds new/changed, drops removed). Silent when the server has none. */
 -export async function syncServerMods(): Promise<void> {
 -    let list: { label: string; stamp: string }[];
 -    try {
@@ -1115,6 +1201,7 @@ index 6316bb3..0000000
 -    for (const stale of have.values()) await removeMod(stale.key);
 -}
 -
+-// ---------------------------------------------------------------- profiles
 -const defaultProfile = (): Profile => ({ id: DEFAULT_PROFILE, name: 'Original game', created: 0, enabled: [], devAuto: false, fsDb: 'omori-fs' });
 -
 -export async function listProfiles(): Promise<Profile[]> {
@@ -1124,6 +1211,7 @@ index 6316bb3..0000000
 -}
 -export const saveProfile = (p: Profile) => tx('profiles', 'readwrite', s => s.put(p));
 -
+-/** The profile this session runs as: `?profile=<id>` wins (and sticks), otherwise whatever was last active. */
 -export async function getActiveProfile(): Promise<Profile> {
 -    const all = await listProfiles();
 -    const asked = new URLSearchParams(location.search).get('profile');
@@ -1134,6 +1222,7 @@ index 6316bb3..0000000
 -}
 -export const setActiveProfile = (id: string) => tx('meta', 'readwrite', s => s.put(id, 'active'));
 -
+-/** Keys of the mods that are switched on for `p`, including dev-folder mods when the profile wants them. */
 -export function enabledKeys(p: Profile, mods: ModRecord[]): Set<string> {
 -    const on = new Set(p.enabled);
 -    if (p.devAuto) for (const m of mods) if (m.origin === 'server') on.add(m.key);
@@ -1155,11 +1244,12 @@ index 6316bb3..0000000
 -    if (id === DEFAULT_PROFILE) throw new Error('the original profile cannot be deleted');
 -    const p = (await listProfiles()).find(x => x.id === id);
 -    if (!p) return;
--    await makeBackup(p, 'before delete');
+-    await makeBackup(p, 'before delete'); // saves of a deleted profile stay recoverable from Backups
 -    await tx('profiles', 'readwrite', s => s.delete(id));
 -    await new Promise<void>(res => { const r = indexedDB.deleteDatabase(p.fsDb); r.onsuccess = r.onerror = r.onblocked = () => res(); });
 -}
 -
+-// ---------------------------------------------------------------- a profile's save storage
 -function openFs(name: string): Promise<IDBDatabase> {
 -    return new Promise((res, rej) => {
 -        const r = indexedDB.open(name, 1);
@@ -1169,6 +1259,7 @@ index 6316bb3..0000000
 -    });
 -}
 -
+-/** Every saved file of a profile (deleted files are skipped). */
 -export async function readAllFs(dbName: string): Promise<Record<string, Uint8Array>> {
 -    const db = await openFs(dbName), out: Record<string, Uint8Array> = {};
 -    try {
@@ -1186,6 +1277,7 @@ index 6316bb3..0000000
 -    return out;
 -}
 -
+-/** Replace a profile's saves with exactly these files. */
 -export async function writeAllFs(dbName: string, files: Record<string, Uint8Array>): Promise<void> {
 -    const db = await openFs(dbName);
 -    try {
@@ -1199,10 +1291,11 @@ index 6316bb3..0000000
 -    } finally { db.close(); }
 -}
 -
+-// ---------------------------------------------------------------- backups
 -export async function makeBackup(p: Profile, reason: string): Promise<Backup | null> {
 -    const files = await readAllFs(p.fsDb);
 -    const n = Object.keys(files).length;
--    if (!n) return null;
+-    if (!n) return null; // nothing worth keeping
 -    const b: Backup = { id: `${p.id}-${Date.now()}`, profile: p.id, profileName: p.name, time: Date.now(), reason, zip: zipSync(files, { level: 3 }), files: n };
 -    await tx('backups', 'readwrite', s => s.put(b));
 -    const mine = (await listBackups()).filter(x => x.profile === p.id);
@@ -1210,11 +1303,13 @@ index 6316bb3..0000000
 -    return b;
 -}
 -
+-/** Newest first. */
 -export async function listBackups(): Promise<Backup[]> {
 -    return ((await tx('backups', 'readonly', s => s.getAll())) as Backup[]).sort((a, b) => b.time - a.time);
 -}
 -export const deleteBackup = (id: string) => tx('backups', 'readwrite', s => s.delete(id));
 -
+-/** Put a backup (or any saves zip) into `target`'s save storage, after backing up what is there now. */
 -export async function restoreInto(target: Profile, zip: Uint8Array): Promise<number> {
 -    const files = unzipSync(zip);
 -    await makeBackup(target, 'before restore');
@@ -1230,7 +1325,9 @@ deleted file mode 100644
 index ebce4ad..0000000
 --- a/src/client/mods/ui.ts
 +++ /dev/null
-@@ -1,390 +0,0 @@
+@@ -1,412 +0,0 @@
+-// Mod manager: drop a .zip (or folder) anywhere on the page to install it; F8 or the corner tab opens the panel.
+-// Installing only adds to the library; where a mod runs is a per-profile choice, and each profile has its own saves.
 -import { loadMod } from '../../mods/manifest.ts';
 -import { memTree, treeFromEntries, treeToZip, zipTreeFromBytes, type Tree } from '../../mods/vfs.ts';
 -import { planInstall } from '../../mods/pack.ts';
@@ -1303,6 +1400,7 @@ index ebce4ad..0000000
 -    refreshTab();
 -}
 -
+-/** Open the mod & profile manager (also on F8). */
 -export const openModManager = () => toggle(true);
 -
 -function toggle(force?: boolean) {
@@ -1335,8 +1433,10 @@ index ebce4ad..0000000
 -    void render();
 -}
 -
+-// ---------------------------------------------------------------- install
 -export interface InstallResult { ok: boolean; label: string; message: string }
 -
+-/** Validate and store one mod in the library. Returns what to tell the user; never throws. */
 -export async function installMod(label: string, zip: Uint8Array): Promise<InstallResult> {
 -    let tree: Tree;
 -    try { tree = zipTreeFromBytes(zip); } catch (e) { return { ok: false, label, message: `${label}: not a valid zip file (${(e as Error).message})` }; }
@@ -1349,11 +1449,16 @@ index ebce4ad..0000000
 -    return { ok: true, label: key, message: `${existing ? 'Updated' : 'Installed'} "${def.name}" ${def.version}${warn}` };
 -}
 -
+-/** Reads a nested archive that isn't a zip (7z, rar, tar.*) found inside a pack. */
 -const nestedReader = (name: string, bytes: Uint8Array) => readArchive(new File([bytes as BlobPart], name));
 -
 -interface Outcome { results: InstallResult[]; notes: string[]; pack?: string }
 -const notes: string[] = [];
 -
+-/**
+- * Install whatever `entries` contains: a single mod, or a modpack (a collection such as OMO CEP that ships its mods as
+- * nested zips). Everything is normalised to one zip per mod, so the rest of the system only ever deals with zips.
+- */
 -async function installEntries(label: string, entries: Record<string, Uint8Array>): Promise<Outcome> {
 -    say(`Reading ${label}…`);
 -    const plan = await planInstall(label, entries, nestedReader);
@@ -1372,6 +1477,7 @@ index ebce4ad..0000000
 -
 -const labelOf = (name: string) => name.replace(/\.(zip|7z|rar|tar|tgz|tar\.gz|tar\.bz2|tbz2|tar\.xz|txz|gz|bz2|xz|mod|omm)$/i, '');
 -
+-/** Any supported archive (zip, 7z, rar, tar.*), alone or several at once. */
 -async function installFiles(files: File[]) {
 -    const out: Outcome[] = [];
 -    for (const f of files) {
@@ -1399,6 +1505,7 @@ index ebce4ad..0000000
 -    notes.splice(0, notes.length, ...outcomes.flatMap(o => o.notes));
 -    const pack = outcomes.find(o => o.pack)?.pack;
 -    if (good.length) {
+-        // Installing only adds to the library. Where it runs is the player's call; the safe default is a separate profile.
 -        const summary = good.length > 3
 -            ? `Installed ${good.length} mod${good.length === 1 ? '' : 's'}${pack ? ` from ${pack}` : ''}${bad.length ? `, ${bad.length} failed` : ''}${notes.length ? `, ${notes.length} skipped` : ''}.`
 -            : `${bad.length ? `${good.length} installed, ${bad.length} failed. ` : ''}${good.map(r => r.message).join('; ')}`;
@@ -1411,13 +1518,14 @@ index ebce4ad..0000000
 -    void render();
 -}
 -
+-// ---------------------------------------------------------------- drag & drop
 -async function readEntry(entry: FileSystemEntry, prefix: string, out: Record<string, Uint8Array>): Promise<void> {
 -    if (entry.isFile) {
 -        const file = await new Promise<File>((res, rej) => (entry as FileSystemFileEntry).file(res, rej));
 -        out[prefix + entry.name] = new Uint8Array(await file.arrayBuffer());
 -    } else if (entry.isDirectory) {
 -        const reader = (entry as FileSystemDirectoryEntry).createReader();
--        for (;;) {
+-        for (;;) { // readEntries returns batches
 -            const batch = await new Promise<FileSystemEntry[]>((res, rej) => reader.readEntries(res, rej));
 -            if (!batch.length) break;
 -            for (const c of batch) await readEntry(c, prefix + entry.name + '/', out);
@@ -1441,6 +1549,7 @@ index ebce4ad..0000000
 -            if (entry.isDirectory) {
 -                const all: Record<string, Uint8Array> = {};
 -                await readEntry(entry, '', all);
+-                // Strip the dropped folder's own name so mod.json sits at the root.
 -                const root = entry.name + '/';
 -                const flat = Object.fromEntries(Object.entries(all).map(([k, v]) => [k.startsWith(root) ? k.slice(root.length) : k, v]));
 -                await installFolder(entry.name, flat);
@@ -1462,8 +1571,10 @@ index ebce4ad..0000000
 -    await installFolder(root, all);
 -}
 -
+-// ---------------------------------------------------------------- profiles
 -const reloadWithoutProfileParam = () => { const u = new URL(location.href); u.searchParams.delete('profile'); location.replace(u); };
 -
+-/** Leave the current profile (its saves are snapshotted first) and reload as `id`. */
 -async function switchTo(id: string) {
 -    if (profile && id !== profile.id) await makeBackup(profile, 'before switching profile');
 -    await setActiveProfile(id);
@@ -1495,10 +1606,12 @@ index ebce4ad..0000000
 -    document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 -}
 -
+-// ---------------------------------------------------------------- panel
 -async function render() {
 -    const [profiles, backups] = await Promise.all([listProfiles().catch(() => [] as Profile[]), listBackups().catch(() => [] as Backup[])]);
 -    const kids: (Node | string)[] = [];
 -
+-    // ---- profile
 -    if (profile) {
 -        const select = el('select', { onchange: () => void switchTo(select.value) },
 -            ...profiles.map(p => el('option', { value: p.id, selected: p.id === profile!.id, textContent: `${p.name}${p.id === DEFAULT_PROFILE ? ' (your existing saves)' : ''} · ${p.enabled.length} mod${p.enabled.length === 1 ? '' : 's'}${p.devAuto ? ' + dev folder' : ''}` })));
@@ -1526,6 +1639,7 @@ index ebce4ad..0000000
 -        kids.push(box);
 -    }
 -
+-    // ---- install
 -    const input = el('input', { type: 'file', accept: ARCHIVE_ACCEPT, multiple: true, style: 'display:none', onchange: () => { void installFiles([...(input.files ?? [])]); } });
 -    const folder = el('input', { type: 'file', multiple: true, style: 'display:none', onchange: () => { void fromFolderInput(folder); } });
 -    folder.setAttribute('webkitdirectory', '');
@@ -1537,6 +1651,7 @@ index ebce4ad..0000000
 -    for (const f of failures) kids.push(el('div', { class: 'omm-msg error' }, f));
 -    for (const n of notes) kids.push(el('div', { class: 'omm-meta', style: 'margin:4px 0' }, `Skipped ${n}`));
 -
+-    // ---- mod library, with this profile's on/off state
 -    kids.push(el('div', { class: 'omm-h' }, 'Mod library'));
 -    if (records.length > 1 && profile) {
 -        const setAll = async (on: boolean) => {
@@ -1578,6 +1693,7 @@ index ebce4ad..0000000
 -        kids.push(card);
 -    }
 -
+-    // ---- runtime errors
 -    const runtime = errors.filter(e => !engine.mods.some(m => m.errors.includes(e.message) || m.warnings.includes(e.message)));
 -    if (runtime.length) {
 -        kids.push(el('div', { class: 'omm-h' }, 'Errors & warnings (newest first)'));
@@ -1587,6 +1703,7 @@ index ebce4ad..0000000
 -        kids.push(el('button', { textContent: 'Clear', onclick: () => { errors.length = 0; refreshTab(); void render(); } }));
 -    }
 -
+-    // ---- save backups
 -    kids.push(el('div', { class: 'omm-h' }, 'Save backups'));
 -    const imp = el('input', { type: 'file', accept: '.zip', style: 'display:none', onchange: async () => {
 -        const f = imp.files?.[0]; if (!f || !profile) return;
@@ -1633,15 +1750,16 @@ index 9e1d08c..c1cc7d6 100644
      loadGame(): void;
      toTitle(): void;
      reduceMotion(): void;
-@@ -115,7 +114,5 @@ export function registerBuiltin(a: Actions) {
+@@ -115,8 +113,6 @@ export function registerBuiltin(a: Actions) {
            control: { type: 'action', button: 'Apply', run: a.reduceMotion } },
  
+         // ---------------------------------------------------------- system
 -        { id: 'mods', tab: 'system', group: 'Mods & saves', label: 'Mods, profiles & save backups', help: 'Install mods, switch profiles (each has its own saves) and restore backups.', keywords: 'profile backup',
 -          control: { type: 'action', button: 'Open (F8)', run: a.openMods } },
          { id: 'loadGame', tab: 'system', group: 'Game', label: 'Load game', visible: inGame, control: { type: 'action', button: 'Load…', run: a.loadGame } },
          { id: 'toTitle', tab: 'system', group: 'Game', label: 'Return to title screen', help: 'Unsaved progress is lost.', visible: inGame, control: { type: 'action', button: 'Return to title', danger: true, run: a.toTitle } },
          { id: 'export', tab: 'system', group: 'Settings', label: 'Export settings', help: 'Save all settings, volumes and key bindings to a file to back them up or move them to another browser.',
-@@ -124,7 +121,7 @@ export function registerBuiltin(a: Actions) {
+@@ -124,7 +118,7 @@ export function registerBuiltin(a: Actions) {
          { id: 'import', tab: 'system', group: 'Settings', label: 'Import settings', control: { type: 'action', button: 'Import…', run: a.importSettings } },
          { id: 'resetAll', tab: 'system', group: 'Settings', label: 'Reset all settings', help: 'Restore every setting and key binding to its default. Saves are not touched.',
            control: { type: 'action', button: 'Reset all', danger: true, run: a.resetAll } },
@@ -1654,12 +1772,25 @@ diff --git a/src/client/settings/index.ts b/src/client/settings/index.ts
 index 42d3445..c7835f1 100644
 --- a/src/client/settings/index.ts
 +++ b/src/client/settings/index.ts
-@@ -1,4 +1,3 @@
+@@ -1,9 +1,7 @@
+ // Installs the modern settings system over the game's built-in options screens.
+ //
+ //  * Game options stay on ConfigManager; this just replaces the UI, so saves and every game system are unaffected.
+-//  * Port options (and mod options) ride along in the same config file under "omoriWeb".
+ //  * The title screen's and the in-game menu's "Options" entries open the new panel instead of the old windows.
 -import { openModManager } from '../mods/ui.ts';
  import { registerBuiltin } from './builtin.ts';
  import * as F from './features.ts';
  import { closeSettings, isOpen, openSettings, settingsStatus } from './panel.ts';
-@@ -62,7 +61,6 @@ export function installSettings() {
+@@ -20,7 +17,6 @@ export { openSettings, closeSettings, isOpen };
+ export function installSettings() {
+     const CM = g.ConfigManager;
+ 
+-    // ---- persistence: port + mod values live inside the game's own config file
+     const makeData = CM.makeData, applyData = CM.applyData;
+     CM.makeData = function (this: any) { const c = makeData.call(this); c.omoriWeb = exportBag(); return c; };
+     CM.applyData = function (this: any, config: any) { applyData.call(this, config); importBag(config?.omoriWeb); };
+@@ -62,7 +58,6 @@ export function installSettings() {
              const text = diagnostics();
              (navigator.clipboard?.writeText(text) ?? Promise.reject()).then(() => settingsStatus('Diagnostics copied'), () => { download('omori-diagnostics.txt', text, 'text/plain'); settingsStatus('Clipboard blocked: saved as a file'); });
          },
@@ -1667,15 +1798,15 @@ index 42d3445..c7835f1 100644
          loadGame() {
              closeSettings(); CM.save();
              g.SceneManager.push(g.Scene_OmoriFile); g.SceneManager._stack.pop(); g.SceneManager._nextScene.setup(false, true);
-@@ -105,7 +103,6 @@ function diagnostics(): string {
+@@ -105,7 +99,6 @@ function diagnostics(): string {
          const ext = gl?.getExtension('WEBGL_debug_renderer_info');
          if (gl && ext) gpu = String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL));
-     } catch {  }
+     } catch { /* blocked */ }
 -    const mods = (g.OmoriMod?.mods ?? []).map((m: any) => `${m.id}@${m.version}${m.enabled ? '' : ' (off)'}`).join(', ') || 'none';
      return [
          `OpenOMORI diagnostics (${new Date().toISOString()})`,
          `page: ${location.href}`,
-@@ -113,7 +110,6 @@ function diagnostics(): string {
+@@ -113,7 +105,6 @@ function diagnostics(): string {
          `gpu: ${gpu}`,
          `canvas: ${G?._width}x${G?._height} logical, ${G?._res}x resolution, scale ${G?._realScale?.toFixed?.(2)}, window ${innerWidth}x${innerHeight} @${devicePixelRatio}x`,
          `scene: ${g.SceneManager?._scene?.constructor?.name}`,
@@ -1702,18 +1833,34 @@ index f27fbad..9a0da72 100644
          if (gname !== group) { group = gname; if (gname) kids.push(h('h2', {}, gname)); }
          kids.push(s.control.type === 'keys' ? keysBlock() : row(s));
      }
+@@ -220,7 +216,7 @@ const keyName = (code: number) =>
+     KEY_NAMES[code] ?? (code >= 48 && code <= 57 ? String(code - 48) : code >= 65 && code <= 90 ? String.fromCharCode(code) : code >= 96 && code <= 105 ? `Num ${code - 96}` : code >= 112 && code <= 123 ? `F${code - 111}` : `Key ${code}`);
+ const PAD_NAMES = ['A', 'B', 'X', 'Y', 'LB', 'RB', 'LT', 'RT', 'Back', 'Start', 'L3', 'R3', '↑', '↓', '←', '→', 'Home'];
+ const padName = (b: number) => PAD_NAMES[b] ?? `Button ${b}`;
+-const RESERVED_KEYS = new Set([116, 118, 119, 120, 121]); // F5 reload, F7 screenshot, F8 mods, F9 debug, F10 settings
++const RESERVED_KEYS = new Set([116, 118, 119, 120, 121]);
+ 
+ function keysBlock(): HTMLElement {
+     const box = h('div', { class: 'keys' });
 diff --git a/src/client/settings/registry.ts b/src/client/settings/registry.ts
 index 7133b5a..2631ff8 100644
 --- a/src/client/settings/registry.ts
 +++ b/src/client/settings/registry.ts
-@@ -6,5 +6,5 @@
+@@ -1,4 +1,3 @@
+-// The settings registry: one list of settings that the panel renders, mods can extend, and persistence rides on.
+ //
+ // Two kinds of value:
+ //   game  lives on the game's own ConfigManager (volumes, text skip, ...). Read and written in place, so every
+@@ -6,7 +5,7 @@
+ //   port  belongs to this browser port (render quality, fast-forward, ...) or to a mod. Kept in a small bag that is
+ //         saved inside the game's config file under "omoriWeb", so it follows the player's profile like everything else.
  
 -export type TabId = 'general' | 'display' | 'audio' | 'controls' | 'accessibility' | 'mods' | 'system';
 +export type TabId = 'general' | 'display' | 'audio' | 'controls' | 'accessibility' | 'system';
  
  export const TABS: { id: TabId; label: string }[] = [
      { id: 'general', label: 'Gameplay' },
-@@ -14,7 +14,6 @@ export const TABS: { id: TabId; label: string }[] = [
+@@ -14,7 +13,6 @@ export const TABS: { id: TabId; label: string }[] = [
      { id: 'audio', label: 'Audio' },
      { id: 'controls', label: 'Controls' },
      { id: 'accessibility', label: 'Accessibility' },
@@ -1739,10 +1886,11 @@ index 7edead2..3ae199c 100644
  const urlOf = (k: string): string => '/' + k.split('/').map(encodeURIComponent).join('/');
  const encodingOf = (o: Encoding): string | undefined => (typeof o === 'string' ? o : o?.encoding ?? undefined);
  
-@@ -35,22 +40,32 @@ class ByteCache {
+@@ -35,23 +46,30 @@ class ByteCache {
  }
  const cache = new ByteCache();
  
+-/** Mods hook in here: they can replace or patch any file the game reads, and add new ones. */
 -export interface ModLayer {
 -    has(key: string): boolean;
 -    resolve(key: string, base: () => Uint8Array | null): Uint8Array | null;
@@ -1757,12 +1905,11 @@ index 7edead2..3ae199c 100644
 -};
 +const withAdded = (names: string[] | null, _dir: string): string[] | null => names;
  const lsCache = new Map<string, string[] | null>();
- const missing = new Set<string>();
+ const missing = new Set<string>(); // keys known not to exist on the server
  
 +interface WebIndex { find(rel: string): number | undefined; list(dir: string): string[] | null }
 +let web: { lookup: WebIndex; files: [string, number][] } | null = null;
 +export function setWebIndex(lookup: WebIndex, files: [string, number][]) { web = { lookup, files }; }
-+
 +const BULK = /\.(png|jpe?g|gif|webp|ogg|m4a|mp3|wav|webm|mp4|ttf|otf|woff2?)$/i;
 +export async function prefetchWebFiles(): Promise<void> {
 +    if (!web) return;
@@ -1778,13 +1925,12 @@ index 7edead2..3ae199c 100644
 +        while (next < todo.length) { const k = todo[next++]!; const u = await fetchAsync(k); if (u) cache.set(k, u); }
 +    }));
 +}
-+
  function fetchSync(k: string): Uint8Array | null {
 +    if (web && web.lookup.find(k) === undefined) return null;
      const xhr = new XMLHttpRequest();
      xhr.open('GET', urlOf(k), false);
      xhr.overrideMimeType('text/plain; charset=x-user-defined');
-@@ -71,6 +86,7 @@ async function fetchAsync(k: string): Promise<Uint8Array | null> {
+@@ -71,6 +102,7 @@ async function fetchAsync(k: string): Promise<Uint8Array | null> {
  
  function listSync(k: string): string[] | null {
      if (lsCache.has(k)) return lsCache.get(k)!;
@@ -1792,7 +1938,15 @@ index 7edead2..3ae199c 100644
      const xhr = new XMLHttpRequest();
      xhr.open('GET', '/__ls?p=' + encodeURIComponent(k), false);
      let res: string[] | null = null;
-@@ -134,11 +150,6 @@ const bytesOf = (data: string | Uint8Array): Uint8Array =>
+@@ -97,7 +130,6 @@ const overlay = new Map<string, Uint8Array | null>(); // null = deleted
+ const overlayDirs = new Set<string>();
+ let idb: IDBDatabase | null = null;
+ 
+-/** Load this session's saves. Each mod profile has its own database, so profiles never see each other's saves. */
+ export async function loadOverlay(dbName = 'omori-fs'): Promise<void> {
+     idb = await new Promise<IDBDatabase | null>(res => {
+         try {
+@@ -134,11 +166,6 @@ const bytesOf = (data: string | Uint8Array): Uint8Array =>
  
  function lookup(k: string): Uint8Array | null | undefined {
      if (overlay.has(k)) return overlay.get(k);
@@ -1804,7 +1958,7 @@ index 7edead2..3ae199c 100644
      return cache.get(k);
  }
  
-@@ -168,10 +179,11 @@ export const fs = {
+@@ -168,10 +190,11 @@ export const fs = {
      existsSync(p: string): boolean {
          const k = keyOf(p);
          if (overlay.has(k)) return overlay.get(k) !== null;
@@ -1817,7 +1971,7 @@ index 7edead2..3ae199c 100644
          const xhr = new XMLHttpRequest();
          xhr.open('HEAD', urlOf(k), false);
          try { xhr.send(); } catch { return false; }
-@@ -183,9 +195,11 @@ export const fs = {
+@@ -183,9 +207,11 @@ export const fs = {
          if (overlayDirs.has(k) || (!overlay.has(k) && listSync(k))) {
              return { isDirectory: () => true, isFile: () => false, size: 0 };
          }
@@ -1844,20 +1998,24 @@ index 409b197..e6bf032 100644
  import { greenworks, nw, processShim, setGameKey } from './nw.ts';
  
  const g = globalThis as Record<string, any>;
-@@ -34,7 +33,6 @@ export const shimReady: Promise<void> = (async () => {
+@@ -34,9 +32,7 @@ export const shimReady: Promise<void> = (async () => {
      const res = await fetch('/__config');
      if (!res.ok) throw new Error('Could not read the game key from your OMORI install (see README: OMORI_DIR).');
      setGameKey((await res.json()).key);
+-    // Saves live in the active mod profile's own database (the original profile keeps the pre-mod one).
 -    const profile = await getActiveProfile().catch(() => null);
 -    await loadOverlay(profile?.fsDb);
 +    await loadOverlay('omori-fs');
+     // The game throws on first run if this file is missing.
      if (!fs.existsSync('/appdata/OMORI/CUTSCENE.json')) fs.writeFileSync('/appdata/OMORI/CUTSCENE.json', '{}');
  })();
 diff --git a/src/server.ts b/src/server.ts
 index 47b4598..47aed02 100644
 --- a/src/server.ts
 +++ b/src/server.ts
-@@ -1,7 +1,6 @@
+@@ -1,9 +1,8 @@
+ // Static server for the OMORI browser port: `bun run src/server.ts [port]`
+ // Serves the game's www folder read-only, plus the built client bundle and a directory-listing endpoint.
 -import { appendFileSync, readdirSync, statSync, watch, writeFileSync } from 'node:fs';
 -import { join, resolve, sep } from 'node:path';
 -import { discoverMods } from './mods/vfs-node.ts';
@@ -1868,25 +2026,31 @@ index 47b4598..47aed02 100644
  import { ROOT, WWW, ensureGameDir, readGameKey } from './gamedir.ts';
  import { storyIndex } from './mods/mapkit-node.ts';
  
-@@ -11,15 +10,5 @@ if (!ensureGameDir()) process.exit(1);   // asks for your OMORI folder the first
+@@ -11,19 +9,6 @@ if (!ensureGameDir()) process.exit(1);   // asks for your OMORI folder the first
  
  const PORT = Number(process.argv[2] ?? process.env.PORT ?? 8080);
  
+-// Mods are applied in the browser (drag a .zip onto the game). This server only offers an optional dev folder:
+-// everything in OMORI_MODS (default ./mods) is shipped to the page as a "server mod" on each load.
 -const MODS_DIR = resolve(process.env.OMORI_MODS ?? join(ROOT, 'mods'));
 -const LOG_FILE = join(ROOT, 'latest.log');
--try { writeFileSync(LOG_FILE, ''); } catch {  }
--const log = (line: string) => { console.log(line); try { appendFileSync(LOG_FILE, `${line}\n`); } catch {  } };
+-try { writeFileSync(LOG_FILE, ''); } catch { /* read-only checkout: log to console only */ }
+-const log = (line: string) => { console.log(line); try { appendFileSync(LOG_FILE, `${line}\n`); } catch { /* best effort */ } };
 -let modsVersion = 1;
 -let bump: ReturnType<typeof setTimeout> | undefined;
 -try {
+-    // Finder writes .DS_Store just from browsing a folder: that is not a change to any mod
 -    watch(MODS_DIR, { recursive: true }, (_ev, name) => { if (name && isOsJunk(String(name).replace(/\\/g, '/'))) return; clearTimeout(bump); bump = setTimeout(() => modsVersion++, 250); });
 -} catch (e) { console.warn(`not watching ${MODS_DIR}: ${(e as Error).message}`); }
 -
  const TYPES: Record<string, string> = { yaml: 'text/plain', yml: 'text/plain', md: 'text/plain', ogg: 'audio/ogg', webm: 'video/webm' };
  
-@@ -95,22 +84,4 @@ const server = Bun.serve({
+ /** Resolve a request path inside WWW, tolerating wrong case (the game asks for /Languages/ but the folder is languages/). */
+@@ -95,25 +67,6 @@ const server = Bun.serve({
+         // Story flags of this install (used by the checkpoint panel for coverage). Scanned once, on first request.
          if (rel === '/__story.json') { try { return Response.json(storyIndex()); } catch (e) { return new Response(String(e), { status: 500 }); } }
--
+ 
+-        // ---- mod API (see docs/MODDING.md)
 -        if (rel === '/__mods/version') return Response.json({ version: modsVersion });
 -        if (rel === '/__mods/list') {
 -            const mods = discoverMods(MODS_DIR, (n, e) => log(`[error] cannot read mod "${n}": ${e.message}`));
@@ -1904,29 +2068,34 @@ index 47b4598..47aed02 100644
 -                return new Response(null, { status: 204 });
 -            }, () => new Response('bad json', { status: 400 }));
 -        }
- 
+-
          const path = resolveInWww(rel);
          if (!path || !statSync(path, { throwIfNoEntry: false })?.isFile()) return new Response('not found', { status: 404 });
+         return fileResponse(path, req);
 diff --git a/src/sw.ts b/src/sw.ts
 index ea4054e..c72801e 100644
 --- a/src/sw.ts
 +++ b/src/sw.ts
-@@ -1,80 +1,19 @@
+@@ -1,85 +1,20 @@
+-// Service worker: serves mod-replaced images, audio, fonts and plain scripts.
+-// (Encrypted data/plugins are handled inside the page by the fs shim, which holds the game key.)
 -import { ModEngine } from './mods/engine.ts';
 -import { zipTreeFromBytes } from './mods/vfs.ts';
 -import { enabledKeys, getActiveProfile, getMeta, listMods, readGenerated } from './client/mods/store.ts';
 +import { dropGame, gameFetch, isAppAsset, relPath, specialRoute } from './web/game-sw.ts';
  
+ // The DOM lib is on for the page code, so worker globals are typed loosely here.
  const sw = self as any;
--
+ 
 -let engine: Promise<ModEngine> | null = null;
 -
 -function build(safe = false): Promise<ModEngine> {
 -    return (async () => {
 -        const e = new ModEngine();
--        if (safe) return e;
+-        if (safe) return e; // ?mods=0: serve everything vanilla
 -        const recs = (await listMods()).sort((a, b) => a.key.localeCompare(b.key));
--        const on = enabledKeys(await getActiveProfile(), recs);
+-        const on = enabledKeys(await getActiveProfile(), recs); // only the active profile's mods
+-        // the page worked out the asset key (it holds the game key) and the patched images; we only serve them
 -        const hexKey = await getMeta<string>('assetKey');
 -        if (hexKey) e.assetKey = Uint8Array.from(hexKey.match(/../g) ?? [], h => parseInt(h, 16));
 -        e.load(recs.map(r => ({ label: r.label, tree: zipTreeFromBytes(r.zip, r.stamp), origin: r.key, disabled: !on.has(r.key) })));
@@ -1935,7 +2104,7 @@ index ea4054e..c72801e 100644
 -    })();
 -}
 -const get = () => (engine ??= build());
- 
+-
  sw.addEventListener('install', () => void sw.skipWaiting());
  sw.addEventListener('activate', (e: any) => e.waitUntil(sw.clients.claim()));
  sw.addEventListener('message', (e: any) => {
@@ -1944,12 +2113,12 @@ index ea4054e..c72801e 100644
 -    e.waitUntil(engine.then(() => e.source?.postMessage({ type: 'reloaded' }), () => e.source?.postMessage({ type: 'reloaded', error: true })));
 +    if (e.data?.type === 'game-reload') dropGame();
  });
--
+ 
 -const MIME: Record<string, string> = {
 -    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', ogg: 'audio/ogg', m4a: 'audio/mp4', mp3: 'audio/mpeg', wav: 'audio/wav',
 -    webm: 'video/webm', mp4: 'video/mp4', ttf: 'font/ttf', otf: 'font/otf', woff: 'font/woff', woff2: 'font/woff2', js: 'text/javascript', json: 'application/json', css: 'text/css', html: 'text/html', txt: 'text/plain', yml: 'text/plain',
 -};
- 
+-
  sw.addEventListener('fetch', (event: any) => {
      const req = event.request;
 -    if (req.method !== 'GET') return;
@@ -1967,7 +2136,7 @@ index ea4054e..c72801e 100644
 -    let path: string;
 -    try { path = decodeURIComponent(url.pathname); } catch { path = url.pathname; }
 -    path = path.replace(/^\/+/, '');
--    if (url.searchParams.has('__vanilla')) return fetch(req);
+-    if (url.searchParams.has('__vanilla')) return fetch(req); // the page asks for the game's own file, e.g. as the base of an image patch
 -    try {
 -        const eng = await get();
 -        if (!eng.hasEdits(path) || eng.isEncrypted(path)) return fetch(req);
@@ -1987,6 +2156,7 @@ index ea4054e..c72801e 100644
 -    }
 -}
 -
+-/** Media elements need Range support to seek. */
 -function ranged(req: Request, bytes: Uint8Array, type: string): Response {
 -    const headers = { 'content-type': type, 'accept-ranges': 'bytes', 'cache-control': 'no-store', 'x-omori-mod': '1' };
 -    const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.get('range') ?? '');
@@ -2004,16 +2174,12 @@ new file mode 100644
 index 0000000..c115dab
 --- /dev/null
 +++ b/src/web/base.ts
-@@ -0,0 +1,14 @@
-+
+@@ -0,0 +1,10 @@
 +export const BASE: string = typeof document === 'undefined' ? '/' : new URL('.', document.baseURI).pathname;
-+
 +if (typeof window !== 'undefined' && BASE !== '/') {
 +    const rebase = (u: string) => (u.startsWith('/') && !u.startsWith('//') && !u.startsWith(BASE) ? BASE + u.slice(1) : u);
-+
 +    const realFetch = window.fetch.bind(window);
 +    window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => realFetch(typeof input === 'string' ? rebase(input) : input, init)) as typeof fetch;
-+
 +    const realOpen = XMLHttpRequest.prototype.open;
 +    XMLHttpRequest.prototype.open = function (this: XMLHttpRequest, method: string, url: string | URL, ...rest: unknown[]) {
 +        return (realOpen as (...a: unknown[]) => void).call(this, method, typeof url === 'string' ? rebase(url) : url, ...rest);
@@ -2024,14 +2190,12 @@ new file mode 100644
 index 0000000..ecfe408
 --- /dev/null
 +++ b/src/web/diag.ts
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,26 @@
 +import { BASE } from './base.ts';
-+
 +export async function runDiagnostics(): Promise<string> {
 +    const lines: string[] = [];
 +    const add = (k: string, v: unknown) => lines.push(`${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
 +    const safe = async <T>(f: () => Promise<T>): Promise<T | string> => { try { return await f(); } catch (e) { return 'threw ' + String(e); } };
-+
 +    add('page', location.href);
 +    add('browser', navigator.userAgent);
 +    add('service worker controls page', !!navigator.serviceWorker?.controller);
@@ -2042,7 +2206,6 @@ index 0000000..ecfe408
 +        const dir = await (await navigator.storage.getDirectory()).getDirectoryHandle('game');
 +        return { firstFileBytes: (await (await dir.getFileHandle('0')).getFile()).size };
 +    }));
-+
 +    for (const p of ['__diag', '__config', '__ls?p=data', 'js/rpg_core.js', 'data/System.KEL', '__failures']) {
 +        add('GET ' + p, await safe(async () => {
 +            const r = await fetch(BASE + p, { cache: 'no-store' });
@@ -2059,10 +2222,9 @@ new file mode 100644
 index 0000000..82782a9
 --- /dev/null
 +++ b/src/web/file-provider.ts
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,15 @@
 +const chan = new BroadcastChannel('omori-game-files');
 +let dir: Promise<FileSystemDirectoryHandle> | null = null;
-+
 +chan.onmessage = async (e: MessageEvent) => {
 +    const m = e.data;
 +    if (m?.type !== 'get') return;
@@ -2075,28 +2237,23 @@ index 0000000..82782a9
 +        chan.postMessage({ type: 'file', id: m.id, file: null, error: String(err) });
 +    }
 +};
-+
 +(self as unknown as Worker).postMessage({ type: 'ready' });
 diff --git a/src/web/game-index.ts b/src/web/game-index.ts
 new file mode 100644
 index 0000000..76b6247
 --- /dev/null
 +++ b/src/web/game-index.ts
-@@ -0,0 +1,32 @@
-+
+@@ -0,0 +1,28 @@
 +export interface GameIndex {
 +    version: 1;
 +    key: string;
 +    files: [string, number][];
 +}
-+
 +export interface Lookup {
 +    find(rel: string): number | undefined;
 +    list(dir: string): string[] | null;
 +}
-+
 +const norm = (p: string) => p.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').toLowerCase();
-+
 +export function buildLookup(files: [string, number][]): Lookup {
 +    const byLower = new Map<string, number>();
 +    const dirs = new Map<string, Map<string, string>>();
@@ -2120,28 +2277,22 @@ new file mode 100644
 index 0000000..5796840
 --- /dev/null
 +++ b/src/web/game-sw.ts
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,120 @@
 +import { getMeta } from './idb.ts';
 +import { buildLookup, type GameIndex, type Lookup } from './game-index.ts';
-+
 +const scope = () => new URL((self as any).registration.scope).pathname;
-+
 +export function relPath(url: URL): string {
 +    let p: string;
 +    try { p = decodeURIComponent(url.pathname); } catch { p = url.pathname; }
 +    const base = scope();
 +    return p.startsWith(base) ? p.slice(base.length) : p.replace(/^\/+/, '');
 +}
-+
 +export const isAppAsset = (rel: string) =>
 +    rel === '' || rel === 'index.html' || rel === 'app.js' || rel === 'app.js.map' || rel === 'sw.js' || rel === 'import-worker.js' || rel === 'file-provider.js' || rel.startsWith('vendor/');
-+
 +interface Loaded { key: string; lookup: Lookup; count: number }
 +let loaded: Promise<Loaded | null> | null = null;
 +let gameDir: Promise<FileSystemDirectoryHandle> | null = null;
-+
 +export function dropGame(): void { loaded = null; gameDir = null; }
-+
 +const load = () => {
 +    if (loaded) return loaded;
 +    const p = (async () => {
@@ -2152,29 +2303,24 @@ index 0000000..5796840
 +    p.then(v => { if (!v && loaded === p) loaded = null; }, () => { if (loaded === p) loaded = null; });
 +    return p;
 +};
-+
 +const failures = new Map<string, string>();
 +function fail(rel: string, why: string): void {
 +    failures.delete(rel);
 +    failures.set(rel, why);
 +    if (failures.size > 40) failures.delete(failures.keys().next().value!);
 +}
-+
 +const MIME: Record<string, string> = {
 +    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', ogg: 'audio/ogg', m4a: 'audio/mp4', mp3: 'audio/mpeg', wav: 'audio/wav',
 +    webm: 'video/webm', mp4: 'video/mp4', ttf: 'font/ttf', otf: 'font/otf', woff: 'font/woff', woff2: 'font/woff2', js: 'text/javascript', json: 'application/json',
 +    css: 'text/css', html: 'text/html', txt: 'text/plain', yml: 'text/plain', yaml: 'text/plain', md: 'text/plain',
 +};
-+
 +const chan = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('omori-game-files');
 +const pending = new Map<number, (m: { file: File | null; error?: string }) => void>();
 +let nextId = 1;
 +let directError: string | null = null;
 +if (chan) chan.onmessage = e => { const m = e.data; if (m?.type === 'file') { pending.get(m.id)?.(m); pending.delete(m.id); } };
-+
 +const within = <T>(p: Promise<T>, ms: number, what: string): Promise<T> =>
 +    new Promise<T>((resolve, reject) => { const t = setTimeout(() => reject(new Error(what + ' timed out')), ms); p.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); }); });
-+
 +async function direct(i: number): Promise<File> {
 +    return within((async () => {
 +        const dir = await (gameDir ??= navigator.storage.getDirectory().then(r => r.getDirectoryHandle('game')));
@@ -2211,7 +2357,6 @@ index 0000000..5796840
 +    }
 +    try { return await viaProvider(i); } catch (e) { throw new Error(`direct: ${directError}; via page: ${String(e)}`); }
 +}
-+
 +export async function gameFetch(req: Request): Promise<Response> {
 +    const g = await load();
 +    const rel = relPath(new URL(req.url));
@@ -2220,7 +2365,6 @@ index 0000000..5796840
 +    if (i === undefined) { fail(rel, 'not in the imported game (404)'); return new Response('not found', { status: 404 }); }
 +    let file: File;
 +    try { file = await openFile(i); } catch (e) { fail(rel, 'storage read failed: ' + String(e)); return new Response('game storage is not available: ' + String(e), { status: 500 }); }
-+
 +    const ext = rel.slice(rel.lastIndexOf('.') + 1).toLowerCase();
 +    const headers: Record<string, string> = { 'content-type': MIME[ext] ?? 'application/octet-stream', 'accept-ranges': 'bytes', 'cache-control': 'no-cache' };
 +    const size = file.size;
@@ -2233,7 +2377,6 @@ index 0000000..5796840
 +    }
 +    return new Response(req.method === 'HEAD' ? null : file, { headers: { ...headers, 'content-length': String(size) } });
 +}
-+
 +export async function specialRoute(req: Request, rel: string, url: URL): Promise<Response> {
 +    switch (rel) {
 +        case '__config': {
@@ -2260,10 +2403,9 @@ new file mode 100644
 index 0000000..ad32390
 --- /dev/null
 +++ b/src/web/idb.ts
-@@ -0,0 +1,26 @@
+@@ -0,0 +1,22 @@
 +const DB = 'omori-mods';
 +const DB_VERSION = 3;
-+
 +function open(): Promise<IDBDatabase> {
 +    return new Promise((res, rej) => {
 +        const r = indexedDB.open(DB, DB_VERSION);
@@ -2277,14 +2419,11 @@ index 0000000..ad32390
 +        r.onerror = () => rej(r.error ?? new Error('cannot open the browser database (private browsing?)'));
 +    });
 +}
-+
 +const done = <T>(r: IDBRequest<T>) => new Promise<T>((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
-+
 +async function tx<T>(store: string, mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<T>): Promise<T> {
 +    const db = await open();
 +    try { return await done(fn(db.transaction(store, mode).objectStore(store))); } finally { db.close(); }
 +}
-+
 +export const getMeta = <T>(key: string) => tx('meta', 'readonly', s => s.get(key)) as Promise<T | undefined>;
 +export const setMeta = (key: string, value: unknown) => tx('meta', 'readwrite', s => s.put(value, key));
 diff --git a/src/web/import-worker.ts b/src/web/import-worker.ts
@@ -2292,15 +2431,12 @@ new file mode 100644
 index 0000000..6b2925d
 --- /dev/null
 +++ b/src/web/import-worker.ts
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,53 @@
 +import { extractKey, findGameRoot, openEntry, readCentralDirectory, readEntry } from './zip.ts';
-+
 +const post = (m: unknown) => (self as unknown as Worker).postMessage(m);
-+
 +self.onmessage = async (e: MessageEvent<{ file: File }>) => {
 +    try { await run(e.data.file); } catch (err) { post({ type: 'error', message: err instanceof Error ? err.message : String(err) }); }
 +};
-+
 +function writeAll(h: any, data: Uint8Array, at: number): number {
 +    let done = 0;
 +    while (done < data.byteLength) {
@@ -2310,27 +2446,22 @@ index 0000000..6b2925d
 +    }
 +    return at + done;
 +}
-+
 +async function run(file: File): Promise<void> {
 +    const entries = await readCentralDirectory(file);
 +    const found = findGameRoot(entries.map(x => x.name));
 +    if (!found) throw new Error('This zip does not look like an OMORI folder: it has no www/js/rpg_core.js. Zip the folder that contains OMORI.exe and www.');
-+
 +    let key: string | null = null;
 +    const bat = found.root === null ? undefined : entries.find(x => x.name.toLowerCase() === found.root + 'launch_omori.bat');
 +    if (bat) key = extractKey(new TextDecoder().decode(await readEntry(file, bat)));
-+
 +    const files = entries.filter(x => !x.name.endsWith('/') && x.name.toLowerCase().startsWith(found.prefix));
 +    const total = files.reduce((n, x) => n + x.usize, 0);
 +    const est = await navigator.storage.estimate?.();
 +    if (est?.quota && est.usage !== undefined && total > est.quota - est.usage) {
 +        throw new Error(`Not enough free browser storage: the game needs ${(total / 2 ** 30).toFixed(1)} GB and about ${((est.quota - est.usage) / 2 ** 30).toFixed(1)} GB is available.`);
 +    }
-+
 +    const root = await navigator.storage.getDirectory();
 +    await root.removeEntry('game', { recursive: true }).catch(() => {});
 +    const dir = await root.getDirectoryHandle('game', { create: true });
-+
 +    const index: [string, number][] = [];
 +    let bytes = 0, lastPost = 0;
 +    for (let i = 0; i < files.length; i++) {
@@ -2359,13 +2490,11 @@ new file mode 100644
 index 0000000..883d99b
 --- /dev/null
 +++ b/src/web/importer.ts
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,122 @@
 +import { BASE } from './base.ts';
 +import type { GameIndex } from './game-index.ts';
 +import { gameIsIntact, removeGame, saveGame } from './store.ts';
-+
 +const params = new URLSearchParams(location.search);
-+
 +export async function ensureGame(): Promise<void> {
 +    if (params.has('server')) return;
 +    if (!('serviceWorker' in navigator) || !navigator.storage?.getDirectory) {
@@ -2376,7 +2505,6 @@ index 0000000..883d99b
 +    await startFileProvider();
 +    if (!(await gameIsIntact())) await importScreen();
 +}
-+
 +async function registerWorker(): Promise<void> {
 +    const reg = await navigator.serviceWorker.register(BASE + 'sw.js', { scope: BASE });
 +    await reg.update().catch(() => {});
@@ -2402,7 +2530,6 @@ index 0000000..883d99b
 +    }
 +    sessionStorage.removeItem('omori-sw-reload');
 +}
-+
 +async function startFileProvider(): Promise<void> {
 +    const w = new Worker(BASE + 'file-provider.js');
 +    (window as unknown as Record<string, unknown>).__omoriFileProvider = w;
@@ -2411,9 +2538,7 @@ index 0000000..883d99b
 +        new Promise<void>(res => setTimeout(res, 3000)),
 +    ]);
 +}
-+
 +const gb = (n: number) => (n / 2 ** 30).toFixed(2) + ' GB';
-+
 +function importScreen(): Promise<void> {
 +    return new Promise<void>(() => {
 +        document.body.innerHTML = `
@@ -2446,14 +2571,12 @@ index 0000000..883d99b
 +</main></div>`;
 +        const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 +        const status = $('status'), bar = $<HTMLProgressElement>('bar'), err = $('err'), input = $<HTMLInputElement>('file');
-+
 +        const finish = async (key: string, files: [string, number][]) => {
 +            const g: GameIndex = { version: 1, key, files };
 +            await saveGame(g);
 +            navigator.serviceWorker.controller?.postMessage({ type: 'game-reload' });
 +            location.reload();
 +        };
-+
 +        input.addEventListener('change', () => {
 +            const file = input.files?.[0];
 +            if (!file) return;
@@ -2495,14 +2618,12 @@ new file mode 100644
 index 0000000..8cc0f72
 --- /dev/null
 +++ b/src/web/store.ts
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,18 @@
 +import { getMeta, setMeta } from './idb.ts';
 +import type { GameIndex } from './game-index.ts';
-+
 +const META = 'webGame';
 +export const getGame = () => getMeta<GameIndex>(META);
 +export const saveGame = (g: GameIndex) => setMeta(META, g);
-+
 +export async function gameIsIntact(): Promise<boolean> {
 +    const g = await getGame().catch(() => undefined);
 +    if (!g?.key || !g.files?.length) return false;
@@ -2512,7 +2633,6 @@ index 0000000..8cc0f72
 +        return true;
 +    } catch { return false; }
 +}
-+
 +export async function removeGame(): Promise<void> {
 +    await (await navigator.storage.getDirectory()).removeEntry('game', { recursive: true }).catch(() => {});
 +    await setMeta(META, undefined);
@@ -2522,29 +2642,24 @@ new file mode 100644
 index 0000000..605711b
 --- /dev/null
 +++ b/src/web/touch.ts
-@@ -0,0 +1,322 @@
+@@ -0,0 +1,299 @@
 +type Name = 'up' | 'down' | 'left' | 'right' | 'ok' | 'escape' | 'shift' | 'pagedown';
 +type GroupId = 'pad' | 'ok' | 'escape' | 'shift' | 'pagedown';
-+
 +const g = globalThis as any;
 +const STORE_KEY = 'omori-touch-layout-v1';
 +const SCALE_MIN = 0.5, SCALE_MAX = 2, SCALE_STEP = 0.1;
-+
 +interface Placed { x: number; y: number; s: number }
 +type Layout = Partial<Record<GroupId, Placed>>;
-+
 +export function isTouchDevice(): boolean {
 +    const coarse = !!matchMedia?.('(pointer: coarse)').matches;
 +    const ua = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent || '');
 +    const ipadOs = navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1;
 +    return (coarse || ua || ipadOs) && (navigator.maxTouchPoints || 0) > 0;
 +}
-+
 +let portrait = false;
 +let editing = false;
 +const isPortrait = () => isTouchDevice() && innerHeight > innerWidth;
 +const set = (name: Name, on: boolean) => { const s = g.Input?._currentState; if (s) s[name] = on; };
-+
 +function loadLayout(): Layout {
 +    try {
 +        const raw = JSON.parse(localStorage.getItem(STORE_KEY) ?? '{}');
@@ -2557,11 +2672,9 @@ index 0000000..605711b
 +    } catch { return {}; }
 +}
 +function saveLayout(l: Layout): void { try { localStorage.setItem(STORE_KEY, JSON.stringify(l)); } catch {  } }
-+
 +export function installTouchControls(): void {
 +    const forced = new URLSearchParams(location.search).has('touch');
 +    if (!isTouchDevice() && !forced) return;
-+
 +    const css = document.createElement('style');
 +    css.textContent = `
 +#omori-touch{position:fixed;inset:0;z-index:2147483000;pointer-events:none;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
@@ -2573,7 +2686,7 @@ index 0000000..605711b
 +#omori-touch .b.small{width:calc(var(--u)*.78);height:calc(var(--u)*.78);font-size:calc(var(--u)*.28)}
 +#omori-touch .pad{pointer-events:auto;touch-action:none;width:calc(var(--u)*3);height:calc(var(--u)*3)}
 +#omori-touch .pad .b{position:absolute;pointer-events:none}
-+#omori-touch.editing{pointer-events:auto} /* a full-screen catcher while editing: taps on empty space deselect instead of reaching the game */
++#omori-touch.editing{pointer-events:auto}
 +#omori-touch.editing .sel{outline:3px dashed #ffd54a;outline-offset:4px}
 +#omori-touch.editing .pad{background:#ffffff14;border-radius:12px}
 +#omori-edit{position:absolute;left:50%;transform:translateX(-50%);top:calc(env(safe-area-inset-top) + 8px);display:none;flex-direction:column;align-items:center;gap:8px;
@@ -2587,15 +2700,12 @@ index 0000000..605711b
 +html.omori-portrait #omori-rotate{display:flex}
 +html.omori-portrait canvas,html.omori-portrait #omori-touch{visibility:hidden}`;
 +    document.head.append(css);
-+
 +    const root = document.createElement('div');
 +    root.id = 'omori-touch';
-+
 +    interface Group { id: GroupId; el: HTMLElement; half: number; home: (m: Metrics) => [number, number] }
 +    interface Metrics { W: number; H: number; L: number; R: number; T: number; B: number; u: number }
 +    const groups: Group[] = [];
 +    const arrows = {} as Record<'up' | 'down' | 'left' | 'right', HTMLElement>;
-+
 +    const pad = document.createElement('div');
 +    pad.className = 'pad grp';
 +    for (const [n, label, pos] of [
@@ -2608,7 +2718,6 @@ index 0000000..605711b
 +    }
 +    root.append(pad);
 +    groups.push({ id: 'pad', el: pad, half: 1.5, home: m => [m.L + 1.9 * m.u, m.H - m.B - 1.9 * m.u] });
-+
 +    const round: { name: Name; el: HTMLElement }[] = [];
 +    const add = (id: GroupId & Name, label: string, half: number, home: Group['home'], small = false, fs = '') => {
 +        const el = document.createElement('div');
@@ -2620,13 +2729,11 @@ index 0000000..605711b
 +    add('escape', 'B', 0.5, m => [m.W - m.R - 2.05 * m.u, m.H - m.B - 0.9 * m.u]);
 +    add('shift', 'RUN', 0.5, m => [m.W - m.R - 2.05 * m.u, m.H - m.B - 2.05 * m.u], false, 'calc(var(--u)*.26)');
 +    add('pagedown', 'W', 0.39, m => [m.W - m.R - 0.79 * m.u, m.T + 0.64 * m.u], true);
-+
 +    const gear = document.createElement('div');
 +    gear.className = 'b small';
 +    gear.textContent = 'E'; gear.setAttribute('aria-label', 'Edit touch layout');
 +    gear.style.position = 'absolute';
 +    root.append(gear);
-+
 +    const bar = document.createElement('div');
 +    bar.id = 'omori-edit';
 +    const hint = document.createElement('div');
@@ -2643,15 +2750,12 @@ index 0000000..605711b
 +    bar.append(hint, row);
 +    root.append(bar);
 +    document.body.append(root);
-+
 +    let saved = loadLayout();
 +    let draft: Layout = {};
 +    let selected: GroupId | null = null;
-+
 +    const probe = document.createElement('div');
 +    probe.style.cssText = 'position:fixed;visibility:hidden;pointer-events:none;left:0;top:0;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)';
 +    document.body.append(probe);
-+
 +    const metrics = (): Metrics => {
 +        const cs = getComputedStyle(probe);
 +        const short = Math.min(innerWidth, innerHeight), long = Math.max(innerWidth, innerHeight);
@@ -2678,11 +2782,9 @@ index 0000000..605711b
 +        gear.style.top = m.T + 0.25 * m.u + 'px';
 +        for (const gr of groups) gr.el.classList.toggle('sel', editing && gr.id === selected);
 +    };
-+
 +    const owner = new Map<number, 'pad' | 'btn'>();
 +    const down = new Map<number, Set<Name>>();
 +    const lit = new Set<Name>();
-+
 +    const padDirs = (x: number, y: number): Set<Name> => {
 +        const r = pad.getBoundingClientRect(), dx = x - (r.left + r.width / 2), dy = y - (r.top + r.height / 2);
 +        const dist = Math.hypot(dx, dy), out = new Set<Name>();
@@ -2711,7 +2813,6 @@ index 0000000..605711b
 +    };
 +    const releaseAll = () => { down.clear(); owner.clear(); apply(); };
 +    const lockOrientation = () => { try { void (screen.orientation as any)?.lock?.('landscape')?.catch?.(() => {}); } catch {  } };
-+
 +    let drag: { id: GroupId; pointer: number; dx: number; dy: number } | null = null;
 +    const groupAt = (t: EventTarget | null) => groups.find(gr => gr.el === t || gr.el.contains(t as Node));
 +    const place = (id: GroupId, cx: number, cy: number, s: number) => { const m = metrics(); draft[id] = { x: cx / m.W, y: cy / m.H, s }; };
@@ -2755,10 +2856,8 @@ index 0000000..605711b
 +    mk('RESET', () => { draft = {}; layout(); });
 +    mk('CANCEL', () => closeEditor(false));
 +    mk('DONE', () => closeEditor(true), 'go');
-+
 +    gear.addEventListener('pointerdown', e => { e.stopPropagation(); });
 +    gear.addEventListener('pointerup', e => { e.stopPropagation(); e.preventDefault(); openEditor(); });
-+
 +    root.addEventListener('pointerdown', (e: PointerEvent) => {
 +        if (portrait) return;
 +        const t = e.target as HTMLElement;
@@ -2813,7 +2912,6 @@ index 0000000..605711b
 +    for (const t of ['touchstart', 'touchmove', 'touchend', 'touchcancel', 'mousedown', 'mousemove', 'mouseup', 'click', 'wheel'])
 +        root.addEventListener(t, e => e.stopPropagation(), { passive: true });
 +    document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAll(); });
-+
 +    const rot = document.createElement('div');
 +    rot.id = 'omori-rotate';
 +    rot.textContent = 'Please rotate your device';
@@ -2835,7 +2933,6 @@ index 0000000..605711b
 +    addEventListener('resize', update);
 +    addEventListener('orientationchange', () => { update(); setTimeout(update, 150); setTimeout(update, 500); });
 +    update();
-+
 +    const hook = setInterval(() => {
 +        const SM = g.SceneManager;
 +        if (!SM?.updateScene || !SM._scene || !SM._sceneStarted) return;
@@ -2850,15 +2947,13 @@ new file mode 100644
 index 0000000..ba5c0f9
 --- /dev/null
 +++ b/src/web/zip.test.ts
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,47 @@
 +import { describe, expect, test } from 'bun:test';
 +import { zipSync } from 'fflate';
 +import { buildLookup } from './game-index.ts';
 +import { extractKey, findGameRoot, readCentralDirectory, readEntry } from './zip.ts';
-+
 +const enc = (s: string) => new TextEncoder().encode(s);
 +const KEY = '0123456789abcdef0123456789abcdef';
-+
 +const sample = () => zipSync({
 +    'OMORI/Launch_OMORI.bat': [enc(`start nw.exe . --${KEY}`), { level: 0 }],
 +    'OMORI/OMORI.exe': [enc('MZ'), { level: 0 }],
@@ -2866,7 +2961,6 @@ index 0000000..ba5c0f9
 +    'OMORI/www/Languages/en/1.HERO': [enc('hello'), { level: 0 }],
 +    'OMORI/www/img/pictures/a%b.rpgmvp': [new Uint8Array([1, 2, 3]), { level: 0 }],
 +});
-+
 +describe('zip reader', () => {
 +    test('lists entries and reads stored and deflated data', async () => {
 +        const file = new Blob([sample()]);
@@ -2877,18 +2971,15 @@ index 0000000..ba5c0f9
 +        const bat = entries.find(e => e.name.endsWith('.bat'))!;
 +        expect(extractKey(new TextDecoder().decode(await readEntry(file, bat)))).toBe(KEY);
 +    });
-+
 +    test('finds the game inside a wrapping folder, or www on its own', () => {
 +        expect(findGameRoot(['OMORI/www/js/rpg_core.js', 'OMORI/OMORI.exe'])).toEqual({ prefix: 'omori/www/', root: 'omori/' });
 +        expect(findGameRoot(['js/rpg_core.js', 'data/System.KEL'])).toEqual({ prefix: '', root: null });
 +        expect(findGameRoot(['www/js/rpg_core.js.bak', 'readme.txt'])).toBeNull();
 +    });
-+
 +    test('rejects things that are not zips', async () => {
 +        await expect(readCentralDirectory(new Blob([enc('not a zip file at all, just some text here')]))).rejects.toThrow();
 +    });
 +});
-+
 +describe('game index', () => {
 +    const files: [string, number][] = [['Languages/en/1.HERO', 5], ['js/rpg_core.js', 9], ['img/a%b.rpgmvp', 3]];
 +    const lookup = buildLookup(files);
@@ -2909,8 +3000,7 @@ new file mode 100644
 index 0000000..26ae38e
 --- /dev/null
 +++ b/src/web/zip.ts
-@@ -0,0 +1,86 @@
-+
+@@ -0,0 +1,77 @@
 +export interface ZipEntry {
 +    name: string;
 +    method: number;
@@ -2918,13 +3008,11 @@ index 0000000..26ae38e
 +    usize: number;
 +    offset: number;
 +}
-+
 +const SIG_EOCD = 0x06054b50, SIG_EOCD64 = 0x06064b50, SIG_LOC64 = 0x07064b50, SIG_CEN = 0x02014b50, SIG_LOCAL = 0x04034b50;
 +const u16 = (v: DataView, o: number) => v.getUint16(o, true);
 +const u32 = (v: DataView, o: number) => v.getUint32(o, true);
 +const u64 = (v: DataView, o: number) => Number(v.getBigUint64(o, true));
 +const view = (b: ArrayBuffer) => new DataView(b);
-+
 +export async function readCentralDirectory(file: Blob): Promise<ZipEntry[]> {
 +    const size = file.size;
 +    if (size < 22) throw new Error('That file is too small to be a zip.');
@@ -2933,7 +3021,6 @@ index 0000000..26ae38e
 +    let eocd = -1;
 +    for (let i = tail.byteLength - 22; i >= 0; i--) if (u32(tail, i) === SIG_EOCD) { eocd = i; break; }
 +    if (eocd < 0) throw new Error('That does not look like a zip file (no end-of-archive record).');
-+
 +    let count = u16(tail, eocd + 10), cdSize = u32(tail, eocd + 12), cdOffset = u32(tail, eocd + 16);
 +    if (count === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) {
 +        const loc = eocd - 20;
@@ -2942,7 +3029,6 @@ index 0000000..26ae38e
 +        if (u32(z64, 0) !== SIG_EOCD64) throw new Error('Corrupt Zip64 end-of-archive record.');
 +        count = u64(z64, 32); cdSize = u64(z64, 40); cdOffset = u64(z64, 48);
 +    }
-+
 +    const buf = await file.slice(cdOffset, cdOffset + cdSize).arrayBuffer();
 +    const cd = view(buf), bytes = new Uint8Array(buf), dec = new TextDecoder();
 +    const out: ZipEntry[] = [];
@@ -2968,7 +3054,6 @@ index 0000000..26ae38e
 +    if (out.length !== count) throw new Error(`Zip directory is damaged (expected ${count} entries, read ${out.length}).`);
 +    return out;
 +}
-+
 +export async function openEntry(file: Blob, e: ZipEntry): Promise<ReadableStream<Uint8Array>> {
 +    const head = view(await file.slice(e.offset, e.offset + 30).arrayBuffer());
 +    if (head.byteLength < 30 || u32(head, 0) !== SIG_LOCAL) throw new Error(`Corrupt zip entry: ${e.name}`);
@@ -2978,11 +3063,9 @@ index 0000000..26ae38e
 +    if (e.method === 8) return raw.pipeThrough(new DecompressionStream('deflate-raw') as unknown as ReadableWritablePair<Uint8Array, Uint8Array>);
 +    throw new Error(`Unsupported compression method ${e.method} for ${e.name}`);
 +}
-+
 +export async function readEntry(file: Blob, e: ZipEntry): Promise<Uint8Array> {
 +    return new Uint8Array(await new Response(await openEntry(file, e)).arrayBuffer());
 +}
-+
 +export function findGameRoot(names: string[]): { prefix: string; root: string | null } | null {
 +    for (const marker of ['www/js/rpg_core.js', 'js/rpg_core.js']) {
 +        for (const n of names) {
@@ -2994,14 +3077,15 @@ index 0000000..26ae38e
 +    }
 +    return null;
 +}
-+
 +export const extractKey = (text: string): string | null => /--([0-9a-f]{32})/i.exec(text)?.[1]?.toLowerCase() ?? null;
 diff --git a/test/mods.ts b/test/mods.ts
 deleted file mode 100644
 index 02d704c..0000000
 --- a/test/mods.ts
 +++ /dev/null
-@@ -1,183 +0,0 @@
+@@ -1,198 +0,0 @@
+-// End-to-end test of browser mod loading in real Chrome: install zips through the Mods panel's file input,
+-// reload, and verify data patches, asset replacement (service worker), error reporting, safe mode, OneLoader zips.
 -import puppeteer, { type Page } from 'puppeteer-core';
 -import { zipSync, strToU8 } from 'fflate';
 -import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
@@ -3019,6 +3103,7 @@ index 02d704c..0000000
 -const failures: string[] = [];
 -const check = (ok: boolean, msg: string) => { console.log(ok ? 'ok  ' : 'FAIL', msg); if (!ok) failures.push(msg); };
 -
+-// ---- fixtures
 -const ICON = new Uint8Array(readFileSync('../OMORI.Build.8879120/www/icon/icon.png'));
 -const PNG = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='), c => c.charCodeAt(0));
 -const zip = (name: string, files: Record<string, Uint8Array | string>) => {
@@ -3044,11 +3129,12 @@ index 02d704c..0000000
 -    'patches/data/Items.json.patch.json': JSON.stringify([{ op: 'replace', path: '/99999/name', value: 'x' }]),
 -});
 -const oneloader = zip('ol-mod', {
--    'mod.json': JSON.stringify({ manifestVersion: 1, id: 'ol-mod', name: 'OneLoader Mod', description: 'v1 manifest', version: '1', files: { data: ['data/Armors.json'] } }),
+-    'mod.json': JSON.stringify({ manifestVersion: 1, id: 'ol-mod', name: 'OneLoader Mod', description: 'v1 manifest', version: '1', files: { data: ['data/Armors.json'] } }), // entries are paths from the mod root, as OneLoader reads them
 -    'data/Armors.json': JSON.stringify(Array.from({ length: 3 }, (_, i) => (i ? { id: i, name: 'ONELOADER ARMOR', description: '', note: '', params: [], traits: [], etypeId: 1, iconIndex: 0, price: 0, atypeId: 0 } : null))),
 -});
 -const invalid = zip('invalid-mod', { 'mod.json': '{ not json' });
 -
+-// ---- other archive formats, built with real tools (7-Zip, tar). The mods sit inside a wrapper folder, as downloads often do.
 -const SEVENZ = 'C:/Program Files/7-Zip/7z.exe';
 -const makeDir = (root: string, files: Record<string, string>) => {
 -    for (const [k, v] of Object.entries(files)) { mkdirSync(join(root, k, '..'), { recursive: true }); writeFileSync(join(root, k), v); }
@@ -3060,6 +3146,7 @@ index 02d704c..0000000
 -const sevenZ = join(work, 'seven-mod.7z');
 -if (have7z) Bun.spawnSync([SEVENZ, 'a', '-bd', sevenZ, join(srcA, 'seven-mod')]);
 -const tgz = join(work, 'tgz-mod.tar.gz');
+-// Windows' own bsdtar: the "tar" on PATH may be Git's GNU tar, which reads "C:\..." as a remote host
 -const tarExe = existsSync('C:/Windows/System32/tar.exe') ? 'C:/Windows/System32/tar.exe' : 'tar';
 -const tarMade = Bun.spawnSync([tarExe, '-czf', tgz, '-C', srcB, 'tgz-mod']);
 -if (tarMade.exitCode !== 0) throw new Error('could not build the tar.gz fixture: ' + tarMade.stderr.toString());
@@ -3079,6 +3166,7 @@ index 02d704c..0000000
 -    await page.keyboard.press('F8');
 -    const input = await page.waitForSelector('#omm-panel.open input[type=file][multiple]:not([webkitdirectory])');
 -    await input!.uploadFile(...zips);
+-    // wait for the final toast (with the profile choice), not the "Unpacking…" progress one
 -    await page.waitForFunction(() => [...document.querySelectorAll('#omm-toast button')].some(b => b.textContent === 'Try in a new profile'), { timeout: 60000 });
 -}
 -
@@ -3088,11 +3176,14 @@ index 02d704c..0000000
 -    const pageErrors: string[] = [];
 -    page.on('pageerror', e => pageErrors.push((e as Error).message));
 -
+-    // ---- 1. vanilla
 -    await load(page);
 -    check(await page.evaluate(() => $dataItems[2].name) === 'COLD STEAK', 'vanilla game: item 2 is COLD STEAK');
+-    // a stand-in for the player's real save
 -    await page.evaluate(() => require('fs').writeFileSync('/appdata/OMORI/TEST_SAVE.txt', 'original'));
 -    page.on('dialog', d => d.accept(d.type() === 'prompt' ? 'Try Mods' : undefined));
 -
+-    // ---- 2. install via the panel, apply on reload
 -    await install(page, hello, assets, oneloader, broken, invalid, tgz, fakeSevenZ, ...(have7z ? [sevenZ] : []));
 -    const toast = await page.evaluate(() => document.getElementById('omm-toast')!.innerText);
 -    check(/installed|Installed/.test(toast), `toast confirms install ("${toast.replace(/\n/g, ' ').slice(0, 80)}")`);
@@ -3100,7 +3191,9 @@ index 02d704c..0000000
 -    check(/invalid-mod/.test(panelText) && /not valid JSON/.test(panelText), 'a mod with invalid mod.json is rejected with the reason shown');
 -    check(/not-really\.7z: not a recognised archive/.test(panelText), 'a file that only pretends to be a 7z is rejected with a clear message');
 -
+-    // installing only adds to the library: nothing is enabled and the original profile is untouched
 -    check(await page.evaluate(() => $dataItems[2].name) === 'COLD STEAK', 'installing a mod does not change the running original profile');
+-    // "Try in a new profile": switches to a fresh profile with the saves copied
 -    await Promise.all([
 -        page.waitForNavigation({ waitUntil: 'load', timeout: 20000 }),
 -        page.evaluate(() => ([...document.querySelectorAll('#omm-toast button')].find(b => b.textContent === 'Try in a new profile') as HTMLElement).click()),
@@ -3126,6 +3219,7 @@ index 02d704c..0000000
 -    if (have7z) check(names[0] === 'SEVEN ZIP STEAK' && r.mods.includes('seven-mod:true'), `.7z mod installed and applied, wrapper folder stripped (${names[0]})`);
 -    else console.log('skip .7z check: 7-Zip not installed at', SEVENZ);
 -
+-    // ---- 3. a broken mod is contained and reported
 -    const e = await page.evaluate(() => (globalThis as any).OmoriMod && document.getElementById('omm-tab')!.textContent);
 -    check(/⚠/.test(e ?? ''), `error badge shown on the Mods tab ("${e}")`);
 -    check(await page.evaluate(() => SceneManager._scene.constructor.name) === 'Scene_OmoriTitleScreen', 'game still reached the title screen despite the broken mod');
@@ -3139,11 +3233,13 @@ index 02d704c..0000000
 -    const log = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
 -    check(/broken-mod/.test(log) && /boom/.test(log), 'errors were written to latest.log');
 -
+-    // ---- 4. safe mode
 -    await load(page, '?mods=0');
 -    check(await page.evaluate(() => $dataItems[2].name) === 'COLD STEAK', '?mods=0 starts the vanilla game');
 -    const iconSafe = await page.evaluate(async () => (await (await fetch('/icon/icon.png', { cache: 'no-store' })).arrayBuffer()).byteLength);
 -    check(iconSafe === ICON.length, `?mods=0 also bypasses the service worker (icon ${iconSafe} bytes)`);
 -
+-    // ---- 5. switching back to the original profile: saves untouched, no mods, automatic backup of the profile we left
 -    await load(page);
 -    await page.keyboard.press('F8');
 -    await page.waitForSelector('#omm-panel select');
@@ -3163,6 +3259,7 @@ index 02d704c..0000000
 -    const panel2 = await page.evaluate(() => document.getElementById('omm-panel')!.innerText);
 -    check(/before switching profile/.test(panel2), 'leaving the modded profile created a save backup');
 -
+-    // ---- 6. back to the modded profile, disable one mod
 -    await Promise.all([
 -        page.waitForNavigation({ waitUntil: 'load', timeout: 20000 }),
 -        page.evaluate(() => { const s = document.querySelector('#omm-panel select') as HTMLSelectElement; s.value = [...s.options].find(o => o.text.includes('Try Mods'))!.value; s.dispatchEvent(new Event('change')); }),
@@ -3189,7 +3286,7 @@ diff --git a/test/settings.ts b/test/settings.ts
 index f8621c4..7d50be4 100644
 --- a/test/settings.ts
 +++ b/test/settings.ts
-@@ -51,6 +51,6 @@ try {
+@@ -51,7 +51,7 @@ try {
      check(splashMs > 3000, `baseline: the splash screens play for a while on a fresh boot (${Math.round(splashMs)} ms)`);
      check(true, `title "Options" opened the new settings panel (boot ${bootMs} ms)`);
      check(await page.evaluate(() => !(globalThis as any).SceneManager._scene._optionsActive), 'the old option windows were not activated');
@@ -3197,10 +3294,12 @@ index f8621c4..7d50be4 100644
 +    check(await page.evaluate(() => [...document.querySelectorAll('#oset nav [data-tab]')].map(b => b.textContent).join()) === 'Gameplay,Display,Audio,Controls,Accessibility,System', 'all six tabs are present');
      await page.screenshot({ path: 'test/out/settings-general.png' });
  
-@@ -136,23 +136,9 @@ try {
+     // ---- 2. game input is blocked while open
+@@ -136,26 +136,11 @@ try {
      check(await page.evaluate(() => (globalThis as any).Input.keyMapper[75]) === 'shift', 'a key already used elsewhere moves to the new action (K: Confirm → Run)');
      await page.screenshot({ path: 'test/out/settings-controls.png' });
--
+ 
+-    // ---- 9. mod settings appear under Mods and persist
 -    await page.evaluate(() => {
 -        const api = (globalThis as any).OmoriMod.scope('test-mod');
 -        (globalThis as any).__modGot = [];
@@ -3214,11 +3313,13 @@ index f8621c4..7d50be4 100644
 -        input.value = '8'; input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true }));
 -    });
 -    check(await page.evaluate(() => (globalThis as any).__modGot.at(-1)) === 8, 'the mod\'s onChange callback received the new value');
- 
+-
+     // ---- 10. persistence across a reload (into the game's own config file)
      await page.keyboard.press('Escape');
-     await sleep(1200);
+     await sleep(1200); // debounced save
      const saved = await page.evaluate(() => JSON.parse((globalThis as any).StorageManager.load(-1)));
 -    check(saved.omoriWeb?.showFps === true && saved.omoriWeb?.['mod.test-mod.power'] === 8, `port + mod values are saved in the game's config file (${JSON.stringify(saved.omoriWeb)})`);
 +    check(saved.omoriWeb?.showFps === true, `port values are saved in the game's config file (${JSON.stringify(saved.omoriWeb)})`);
      check(saved.textSkip === !before && saved.keyboardInputMap?.[74] === 'ok', 'game values and key bindings are saved in the same file');
  
+     // ---- 11. reload: values come back; enable skipSplash and see the boot get faster
