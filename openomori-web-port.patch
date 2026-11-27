@@ -230,6 +230,13 @@ index f8d1a89..7915c1c 100644
          }
      }
  
+@@ -20,5 +20,5 @@ export interface DisplayOptions {
+  */
+-export const displayPrefs = { quality: 0, wide: true, smooth: true };
++export const displayPrefs = { quality: 0, wide: false, smooth: true };
+ export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): void {
+     const G = Graphics;
+     const query = new URLSearchParams(location.search);
 diff --git a/src/client/entry.ts b/src/client/entry.ts
 index 95ea58c..9ac58a9 100644
 --- a/src/client/entry.ts
@@ -1775,6 +1782,19 @@ index 9e1d08c..c1cc7d6 100644
            control: { type: 'action', button: 'Copy', run: a.copyDiagnostics } },
      ];
      S.forEach(register);
+@@ -32,4 +32,4 @@ export function registerBuiltin(a: Actions) {
+     // ---- ports: these are this browser build's own features
+     const quality = portValue<number>('quality', 0, v => { displayPrefs.quality = v; F.applyDisplay(); });
+-    const wide = portValue<boolean>('wide', true, v => { displayPrefs.wide = v; });
++    const wide = portValue<boolean>('wide', false, v => { displayPrefs.wide = v; });
+     const smooth = portValue<boolean>('smooth', true, v => { displayPrefs.smooth = v; F.applyDisplay(); });
+@@ -68,5 +68,5 @@ export function registerBuiltin(a: Actions) {
+         // ---------------------------------------------------------- display
+         { id: 'fullscreen', tab: 'display', group: 'Window', label: 'Fullscreen', default: false, keywords: 'window screen',
+           control: { type: 'toggle', get: () => F.isFullscreen(), set: v => { C().fullScreen = v; F.setFullscreen(v); scheduleSave(); notify(); } } },
+-        { id: 'wide', tab: 'display', group: 'Window', label: 'Widescreen maps', help: 'Show more of the world at the sides on wide windows. Menus and battles always stay 4:3.', default: true, keywords: 'ultrawide aspect ratio',
++        { id: 'wide', tab: 'display', group: 'Window', label: 'Widescreen maps', help: 'Show more of the world at the sides on wide windows. Menus and battles always stay 4:3.', default: false, keywords: 'ultrawide aspect ratio',
+           note: () => (g.SceneManager?._scene instanceof g.Scene_Map ? 'Applies on the next map you enter.' : undefined), control: { type: 'toggle', get: wide.get, set: wide.set } },
 diff --git a/src/client/settings/index.ts b/src/client/settings/index.ts
 index 42d3445..c7835f1 100644
 --- a/src/client/settings/index.ts
@@ -2410,17 +2430,15 @@ new file mode 100644
 index 0000000..ad32390
 --- /dev/null
 +++ b/src/web/idb.ts
-@@ -0,0 +1,22 @@
-+const DB = 'omori-mods';
-+const DB_VERSION = 3;
+@@ -0,0 +1,20 @@
++const DB = 'openomori-web';
++const DB_VERSION = 1;
 +function open(): Promise<IDBDatabase> {
 +    return new Promise((res, rej) => {
 +        const r = indexedDB.open(DB, DB_VERSION);
 +        r.onupgradeneeded = () => {
 +            const db = r.result;
-+            for (const [name, opts] of [['mods', { keyPath: 'key' }], ['profiles', { keyPath: 'id' }], ['backups', { keyPath: 'id' }], ['meta', undefined], ['gen', undefined], ['olidcache', undefined]] as const) {
-+                if (!db.objectStoreNames.contains(name)) db.createObjectStore(name, opts);
-+            }
++            if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
 +        };
 +        r.onsuccess = () => res(r.result);
 +        r.onerror = () => rej(r.error ?? new Error('cannot open the browser database (private browsing?)'));
@@ -2649,14 +2667,14 @@ new file mode 100644
 index 0000000..605711b
 --- /dev/null
 +++ b/src/web/touch.ts
-@@ -0,0 +1,299 @@
+@@ -0,0 +1,303 @@
 +type Name = 'up' | 'down' | 'left' | 'right' | 'ok' | 'escape' | 'shift' | 'pagedown';
 +type GroupId = 'pad' | 'ok' | 'escape' | 'shift' | 'pagedown';
 +const g = globalThis as any;
 +const STORE_KEY = 'omori-touch-layout-v1';
 +const SCALE_MIN = 0.5, SCALE_MAX = 2, SCALE_STEP = 0.1;
 +interface Placed { x: number; y: number; s: number }
-+type Layout = Partial<Record<GroupId, Placed>>;
++type Layout = Partial<Record<GroupId, Placed>> & { opacity?: number };
 +export function isTouchDevice(): boolean {
 +    const coarse = !!matchMedia?.('(pointer: coarse)').matches;
 +    const ua = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent || '');
@@ -2686,10 +2704,10 @@ index 0000000..605711b
 +    css.textContent = `
 +#omori-touch{position:fixed;inset:0;z-index:2147483000;pointer-events:none;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
 +#omori-touch .grp{position:absolute;transform:translate(-50%,-50%) scale(var(--s,1))}
-+#omori-touch .b{box-sizing:border-box;display:flex;align-items:center;justify-content:center;border-radius:50%;
-+  background:rgba(25,30,40,.84);border:2px solid rgba(255,255,255,.92);color:#fff;font:bold calc(var(--u)*.34) system-ui,sans-serif;box-shadow:0 1px 5px #0009;text-shadow:0 1px 2px #000;
++#omori-touch .b{box-sizing:border-box;display:flex;align-items:center;justify-content:center;border-radius:50%;opacity:var(--control-opacity,.72);
++  background:rgba(105,110,118,.78);border:2px solid rgba(235,235,235,.9);color:#fff;font:bold calc(var(--u)*.34) system-ui,sans-serif;box-shadow:0 1px 5px #0009;text-shadow:0 1px 2px #000;
 +  pointer-events:auto;touch-action:none;-webkit-tap-highlight-color:transparent;width:var(--u);height:var(--u)}
-+#omori-touch .b.on{background:rgba(65,105,165,.96)}
++#omori-touch .b.on{background:rgba(135,140,148,.92)}
 +#omori-touch .b.small{width:calc(var(--u)*.78);height:calc(var(--u)*.78);font-size:calc(var(--u)*.28)}
 +#omori-touch .pad{pointer-events:auto;touch-action:none;width:calc(var(--u)*3);height:calc(var(--u)*3)}
 +#omori-touch .pad .b{position:absolute;pointer-events:none}
@@ -2754,7 +2772,7 @@ index 0000000..605711b
 +        b.addEventListener('pointerup', e => { e.stopPropagation(); e.preventDefault(); if (armed === e.pointerId) { armed = -1; fn(); } });
 +        row.append(b); return b;
 +    };
-+    bar.append(hint, row);
++    bar.append(hint, opacityRow, row);
 +    root.append(bar);
 +    document.body.append(root);
 +    let saved = loadLayout();
@@ -2777,6 +2795,9 @@ index 0000000..605711b
 +    const layout = () => {
 +        const m = metrics();
 +        root.style.setProperty('--u', m.u + 'px');
++        const opacity = (editing ? draft.opacity : saved.opacity) ?? 0.72;
++        root.style.setProperty('--control-opacity', String(opacity));
++        opacitySlider.value = String(opacity);
 +        for (const gr of groups) {
 +            const p = current(gr.id);
 +            const s = p?.s ?? 1;
@@ -2858,6 +2879,7 @@ index 0000000..605711b
 +        root.classList.remove('editing');
 +        layout();
 +    };
++    opacitySlider.addEventListener('input', () => { draft.opacity = Number(opacitySlider.value); layout(); });
 +    mk('−', () => resize(-SCALE_STEP));
 +    mk('+', () => resize(SCALE_STEP));
 +    mk('RESET', () => { draft = {}; layout(); });
@@ -2884,7 +2906,7 @@ index 0000000..605711b
 +        if (pad.contains(t)) {
 +            owner.set(e.pointerId, 'pad'); down.set(e.pointerId, padDirs(e.clientX, e.clientY));
 +        } else {
-+            const n = buttonAt(e.clientX, e.clientY);
++            const n = round.find(b => b.el === t || b.el.contains(t))?.name ?? null;
 +            if (!n) return;
 +            owner.set(e.pointerId, 'btn'); down.set(e.pointerId, new Set([n]));
 +        }
