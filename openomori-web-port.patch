@@ -3371,3 +3371,969 @@ index 9dc6118..e20bb96 100644
  }
  
  declare const OmoriMod: OmoriModApi;
+diff --git a/src/client/save-import.ts b/src/client/save-import.ts
+new file mode 100644
+index 0000000..a47ba7b
+--- /dev/null
++++ b/src/client/save-import.ts
+@@ -0,0 +1,32 @@
++import { fs } from './shim/fs.ts';
++
++export function installSaveImporter(): void {
++    const importFiles = () => {
++        const input = document.createElement('input');
++        input.type = 'file';
++        input.accept = '.rpgsave,application/octet-stream';
++        input.multiple = true;
++        input.onchange = async () => {
++            const files = [...(input.files ?? [])];
++            if (!files.length) return;
++            if (files.some(f => !/^file\d+\.rpgsave$/i.test(f.name))) {
++                alert('Choose OMORI save files named file1.rpgsave, file2.rpgsave, and so on.');
++                return;
++            }
++            if (!confirm(`Import ${files.length} save file(s)? Files with matching names will be replaced.`)) return;
++            try {
++                fs.mkdirSync('/save');
++                for (const file of files) fs.writeFileSync(`/save/${file.name}`, new Uint8Array(await file.arrayBuffer()));
++                alert(`Imported ${files.length} save file(s). Return to the title screen to load them.`);
++            } catch (e) { alert(`Could not import saves: ${(e as Error).message}`); }
++        };
++        input.click();
++    };
++    window.addEventListener('keydown', e => {
++        if (e.key.toLowerCase() !== 'i' || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
++        const target = e.target as HTMLElement | null;
++        if (target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName ?? '')) return;
++        e.preventDefault(); importFiles();
++    });
++    window.addEventListener('omori-import-save', importFiles);
++}
+diff --git a/src/web/base.ts b/src/web/base.ts
+new file mode 100644
+index 0000000..967c8f8
+--- /dev/null
++++ b/src/web/base.ts
+@@ -0,0 +1,10 @@
++export const BASE: string = typeof document === 'undefined' ? '/' : new URL('.', document.baseURI).pathname;
++if (typeof window !== 'undefined' && BASE !== '/') {
++    const rebase = (u: string) => (u.startsWith('/') && !u.startsWith('//') && !u.startsWith(BASE) ? BASE + u.slice(1) : u);
++    const realFetch = window.fetch.bind(window);
++    window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => realFetch(typeof input === 'string' ? rebase(input) : input, init)) as typeof fetch;
++    const realOpen = XMLHttpRequest.prototype.open;
++    XMLHttpRequest.prototype.open = function (this: XMLHttpRequest, method: string, url: string | URL, ...rest: unknown[]) {
++        return (realOpen as (...a: unknown[]) => void).call(this, method, typeof url === 'string' ? rebase(url) : url, ...rest);
++    } as typeof XMLHttpRequest.prototype.open;
++}
+diff --git a/src/web/diag.ts b/src/web/diag.ts
+new file mode 100644
+index 0000000..f5fddfe
+--- /dev/null
++++ b/src/web/diag.ts
+@@ -0,0 +1,26 @@
++import { BASE } from './base.ts';
++export async function runDiagnostics(): Promise<string> {
++    const lines: string[] = [];
++    const add = (k: string, v: unknown) => lines.push(`${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
++    const safe = async <T>(f: () => Promise<T>): Promise<T | string> => { try { return await f(); } catch (e) { return 'threw ' + String(e); } };
++    add('page', location.href);
++    add('browser', navigator.userAgent);
++    add('service worker controls page', !!navigator.serviceWorker?.controller);
++    add('registration', await safe(async () => { const r = await navigator.serviceWorker.getRegistration(BASE); return r ? { scope: r.scope, active: !!r.active } : null; }));
++    add('storage estimate', await safe(async () => navigator.storage.estimate()));
++    add('storage persisted', await safe(async () => navigator.storage.persisted()));
++    add('page can read game storage', await safe(async () => {
++        const dir = await (await navigator.storage.getDirectory()).getDirectoryHandle('game');
++        return { firstFileBytes: (await (await dir.getFileHandle('0')).getFile()).size };
++    }));
++    for (const p of ['__diag', '__config', '__ls?p=data', 'js/rpg_core.js', 'data/System.KEL', '__failures']) {
++        add('GET ' + p, await safe(async () => {
++            const r = await fetch(BASE + p, { cache: 'no-store' });
++            if (p === '__config') return `${r.status} ${r.ok && 'key' in (await r.json()) ? 'key present' : 'no key'}`;
++            if (p === '__failures') return `${r.status} ${(await r.text())}`;
++            if (p.endsWith('.js') || p.endsWith('.KEL')) return `${r.status} ${r.ok ? (await r.arrayBuffer()).byteLength + ' bytes' : (await r.text()).slice(0, 200)}`;
++            return `${r.status} ${(await r.text()).slice(0, 300)}`;
++        }));
++    }
++    return lines.join('\n');
++}
+diff --git a/src/web/file-provider.ts b/src/web/file-provider.ts
+new file mode 100644
+index 0000000..d18fa13
+--- /dev/null
++++ b/src/web/file-provider.ts
+@@ -0,0 +1,15 @@
++const chan = new BroadcastChannel('omori-game-files');
++let dir: Promise<FileSystemDirectoryHandle> | null = null;
++chan.onmessage = async (e: MessageEvent) => {
++    const m = e.data;
++    if (m?.type !== 'get') return;
++    try {
++        const d = await (dir ??= navigator.storage.getDirectory().then(r => r.getDirectoryHandle('game')));
++        const file = await (await d.getFileHandle(String(m.file))).getFile();
++        chan.postMessage({ type: 'file', id: m.id, file });
++    } catch (err) {
++        dir = null;
++        chan.postMessage({ type: 'file', id: m.id, file: null, error: String(err) });
++    }
++};
++(self as unknown as Worker).postMessage({ type: 'ready' });
+diff --git a/src/web/game-index.ts b/src/web/game-index.ts
+new file mode 100644
+index 0000000..a19c5fc
+--- /dev/null
++++ b/src/web/game-index.ts
+@@ -0,0 +1,28 @@
++export interface GameIndex {
++    version: 1;
++    key: string;
++    files: [string, number][];
++}
++export interface Lookup {
++    find(rel: string): number | undefined;
++    list(dir: string): string[] | null;
++}
++const norm = (p: string) => p.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').toLowerCase();
++export function buildLookup(files: [string, number][]): Lookup {
++    const byLower = new Map<string, number>();
++    const dirs = new Map<string, Map<string, string>>();
++    files.forEach(([path], i) => {
++        byLower.set(path.toLowerCase(), i);
++        const parts = path.split('/');
++        for (let d = 0; d < parts.length; d++) {
++            const parent = parts.slice(0, d).join('/').toLowerCase();
++            let m = dirs.get(parent);
++            if (!m) dirs.set(parent, (m = new Map()));
++            m.set(parts[d]!.toLowerCase(), parts[d]!);
++        }
++    });
++    return {
++        find: rel => byLower.get(norm(rel)),
++        list: dir => { const m = dirs.get(norm(dir)); return m ? [...m.values()] : null; },
++    };
++}
+diff --git a/src/web/game-sw.ts b/src/web/game-sw.ts
+new file mode 100644
+index 0000000..3a65c34
+--- /dev/null
++++ b/src/web/game-sw.ts
+@@ -0,0 +1,120 @@
++import { getMeta } from './idb.ts';
++import { buildLookup, type GameIndex, type Lookup } from './game-index.ts';
++const scope = () => new URL((self as any).registration.scope).pathname;
++export function relPath(url: URL): string {
++    let p: string;
++    try { p = decodeURIComponent(url.pathname); } catch { p = url.pathname; }
++    const base = scope();
++    return p.startsWith(base) ? p.slice(base.length) : p.replace(/^\/+/, '');
++}
++export const isAppAsset = (rel: string) =>
++    rel === '' || rel === 'index.html' || rel === 'app.js' || rel === 'app.js.map' || rel === 'sw.js' || rel === 'import-worker.js' || rel === 'file-provider.js' || rel.startsWith('vendor/');
++interface Loaded { key: string; lookup: Lookup; count: number }
++let loaded: Promise<Loaded | null> | null = null;
++let gameDir: Promise<FileSystemDirectoryHandle> | null = null;
++export function dropGame(): void { loaded = null; gameDir = null; }
++const load = () => {
++    if (loaded) return loaded;
++    const p = (async () => {
++        const g = await getMeta<GameIndex>('webGame');
++        return g?.key ? { key: g.key, lookup: buildLookup(g.files), count: g.files.length } : null;
++    })();
++    loaded = p;
++    p.then(v => { if (!v && loaded === p) loaded = null; }, () => { if (loaded === p) loaded = null; });
++    return p;
++};
++const failures = new Map<string, string>();
++function fail(rel: string, why: string): void {
++    failures.delete(rel);
++    failures.set(rel, why);
++    if (failures.size > 40) failures.delete(failures.keys().next().value!);
++}
++const MIME: Record<string, string> = {
++    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', ogg: 'audio/ogg', m4a: 'audio/mp4', mp3: 'audio/mpeg', wav: 'audio/wav',
++    webm: 'video/webm', mp4: 'video/mp4', ttf: 'font/ttf', otf: 'font/otf', woff: 'font/woff', woff2: 'font/woff2', js: 'text/javascript', json: 'application/json',
++    css: 'text/css', html: 'text/html', txt: 'text/plain', yml: 'text/plain', yaml: 'text/plain', md: 'text/plain',
++};
++const chan = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('omori-game-files');
++const pending = new Map<number, (m: { file: File | null; error?: string }) => void>();
++let nextId = 1;
++let directError: string | null = null;
++if (chan) chan.onmessage = e => { const m = e.data; if (m?.type === 'file') { pending.get(m.id)?.(m); pending.delete(m.id); } };
++const within = <T>(p: Promise<T>, ms: number, what: string): Promise<T> =>
++    new Promise<T>((resolve, reject) => { const t = setTimeout(() => reject(new Error(what + ' timed out')), ms); p.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); }); });
++async function direct(i: number): Promise<File> {
++    return within((async () => {
++        const dir = await (gameDir ??= navigator.storage.getDirectory().then(r => r.getDirectoryHandle('game')));
++        return (await dir.getFileHandle(String(i))).getFile();
++    })(), 3000, 'opening game storage');
++}
++const LIMIT = 6;
++let active = 0;
++const waiting: (() => void)[] = [];
++async function slot<T>(f: () => Promise<T>): Promise<T> {
++    if (active >= LIMIT) await new Promise<void>(res => waiting.push(res));
++    active++;
++    try { return await f(); } finally { active--; waiting.shift()?.(); }
++}
++async function viaProvider(i: number): Promise<File> {
++    let last: unknown;
++    for (let attempt = 0; attempt < 3; attempt++) {
++        try { return await slot(() => askProvider(i)); } catch (e) { last = e; }
++    }
++    throw last;
++}
++function askProvider(i: number): Promise<File> {
++    return new Promise((resolve, reject) => {
++        if (!chan) return reject(new Error('no BroadcastChannel'));
++        const id = nextId++;
++        const t = setTimeout(() => { pending.delete(id); reject(new Error('the page did not answer (file-provider worker not running?)')); }, 4000);
++        pending.set(id, m => { clearTimeout(t); m.file ? resolve(m.file) : reject(new Error(m.error ?? 'file not found in storage')); });
++        chan.postMessage({ type: 'get', id, file: i });
++    });
++}
++async function openFile(i: number): Promise<File> {
++    if (directError === null) {
++        try { return await direct(i); } catch (e) { gameDir = null; directError = String(e); }
++    }
++    try { return await viaProvider(i); } catch (e) { throw new Error(`direct: ${directError}; via page: ${String(e)}`); }
++}
++export async function gameFetch(req: Request): Promise<Response> {
++    const g = await load();
++    const rel = relPath(new URL(req.url));
++    if (!g) { fail(rel, 'no game imported yet'); return new Response('no game imported yet', { status: 404 }); }
++    const i = g.lookup.find(rel);
++    if (i === undefined) { fail(rel, 'not in the imported game (404)'); return new Response('not found', { status: 404 }); }
++    let file: File;
++    try { file = await openFile(i); } catch (e) { fail(rel, 'storage read failed: ' + String(e)); return new Response('game storage is not available: ' + String(e), { status: 500 }); }
++    const ext = rel.slice(rel.lastIndexOf('.') + 1).toLowerCase();
++    const headers: Record<string, string> = { 'content-type': MIME[ext] ?? 'application/octet-stream', 'accept-ranges': 'bytes', 'cache-control': 'no-cache' };
++    const size = file.size;
++    const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.get('range') ?? '');
++    if (m && (m[1] || m[2])) {
++        const start = m[1] ? Number(m[1]) : Math.max(0, size - Number(m[2]));
++        const end = m[1] && m[2] ? Math.min(Number(m[2]), size - 1) : size - 1;
++        if (start > end || start >= size) return new Response(null, { status: 416, headers: { 'content-range': `bytes */${size}` } });
++        return new Response(req.method === 'HEAD' ? null : file.slice(start, end + 1), { status: 206, headers: { ...headers, 'content-range': `bytes ${start}-${end}/${size}`, 'content-length': String(end - start + 1) } });
++    }
++    return new Response(req.method === 'HEAD' ? null : file, { headers: { ...headers, 'content-length': String(size) } });
++}
++export async function specialRoute(req: Request, rel: string, url: URL): Promise<Response> {
++    switch (rel) {
++        case '__config': {
++            const g = await load();
++            return g ? Response.json({ key: g.key }) : new Response('no game imported yet', { status: 404 });
++        }
++        case '__ls': {
++            const names = (await load())?.lookup.list(url.searchParams.get('p') ?? '');
++            return names ? Response.json(names) : new Response(null, { status: 404 });
++        }
++        case '__diag': {
++            const g = await load();
++            const out: Record<string, unknown> = { hasGame: !!g, files: g?.count };
++            try { out.workerReadsStorageItself = { firstFileBytes: (await direct(0)).size }; } catch (e) { out.workerReadsStorageItself = 'threw ' + String(e); }
++            try { out.viaFileProvider = { firstFileBytes: (await viaProvider(0)).size }; } catch (e) { out.viaFileProvider = 'threw ' + String(e); }
++            return Response.json(out);
++        }
++        case '__failures': return Response.json([...failures].map(([path, why]) => `${path}: ${why}`));
++        default: return new Response('not found', { status: 404 });
++    }
++}
+diff --git a/src/web/idb.ts b/src/web/idb.ts
+new file mode 100644
+index 0000000..0ec1a64
+--- /dev/null
++++ b/src/web/idb.ts
+@@ -0,0 +1,20 @@
++const DB = 'openomori-web';
++const DB_VERSION = 1;
++function open(): Promise<IDBDatabase> {
++    return new Promise((res, rej) => {
++        const r = indexedDB.open(DB, DB_VERSION);
++        r.onupgradeneeded = () => {
++            const db = r.result;
++            if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
++        };
++        r.onsuccess = () => res(r.result);
++        r.onerror = () => rej(r.error ?? new Error('cannot open the browser database (private browsing?)'));
++    });
++}
++const done = <T>(r: IDBRequest<T>) => new Promise<T>((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
++async function tx<T>(store: string, mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<T>): Promise<T> {
++    const db = await open();
++    try { return await done(fn(db.transaction(store, mode).objectStore(store))); } finally { db.close(); }
++}
++export const getMeta = <T>(key: string) => tx('meta', 'readonly', s => s.get(key)) as Promise<T | undefined>;
++export const setMeta = (key: string, value: unknown) => tx('meta', 'readwrite', s => s.put(value, key));
+diff --git a/src/web/import-worker.ts b/src/web/import-worker.ts
+new file mode 100644
+index 0000000..36fb1d8
+--- /dev/null
++++ b/src/web/import-worker.ts
+@@ -0,0 +1,53 @@
++import { extractKey, findGameRoot, openEntry, readCentralDirectory, readEntry } from './zip.ts';
++const post = (m: unknown) => (self as unknown as Worker).postMessage(m);
++self.onmessage = async (e: MessageEvent<{ file: File }>) => {
++    try { await run(e.data.file); } catch (err) { post({ type: 'error', message: err instanceof Error ? err.message : String(err) }); }
++};
++function writeAll(h: any, data: Uint8Array, at: number): number {
++    let done = 0;
++    while (done < data.byteLength) {
++        const n = h.write(data.subarray(done), { at: at + done });
++        if (!n) throw new Error('The browser stopped accepting data (out of storage?).');
++        done += n;
++    }
++    return at + done;
++}
++async function run(file: File): Promise<void> {
++    const entries = await readCentralDirectory(file);
++    const found = findGameRoot(entries.map(x => x.name));
++    if (!found) throw new Error('This zip does not look like an OMORI folder: it has no www/js/rpg_core.js. Zip the folder that contains OMORI.exe and www.');
++    let key: string | null = null;
++    const bat = found.root === null ? undefined : entries.find(x => x.name.toLowerCase() === found.root + 'launch_omori.bat');
++    if (bat) key = extractKey(new TextDecoder().decode(await readEntry(file, bat)));
++    const files = entries.filter(x => !x.name.endsWith('/') && x.name.toLowerCase().startsWith(found.prefix));
++    const total = files.reduce((n, x) => n + x.usize, 0);
++    const est = await navigator.storage.estimate?.();
++    if (est?.quota && est.usage !== undefined && total > est.quota - est.usage) {
++        throw new Error(`Not enough free browser storage: the game needs ${(total / 2 ** 30).toFixed(1)} GB and about ${((est.quota - est.usage) / 2 ** 30).toFixed(1)} GB is available.`);
++    }
++    const root = await navigator.storage.getDirectory();
++    await root.removeEntry('game', { recursive: true }).catch(() => {});
++    const dir = await root.getDirectoryHandle('game', { create: true });
++    const index: [string, number][] = [];
++    let bytes = 0, lastPost = 0;
++    for (let i = 0; i < files.length; i++) {
++        const en = files[i]!;
++        const handle = await (await dir.getFileHandle(String(i), { create: true }) as any).createSyncAccessHandle();
++        let at = 0;
++        try {
++            const reader = (await openEntry(file, en)).getReader();
++            for (;;) {
++                const { done, value } = await reader.read();
++                if (done) break;
++                at = writeAll(handle, value, at);
++            }
++            handle.flush();
++        } finally { handle.close(); }
++        if (at !== en.usize) throw new Error(`Corrupt zip entry (size mismatch): ${en.name}`);
++        index.push([en.name.slice(found.prefix.length), at]);
++        bytes += at;
++        const now = Date.now();
++        if (now - lastPost > 150) { lastPost = now; post({ type: 'progress', files: i + 1, totalFiles: files.length, bytes, totalBytes: total }); }
++    }
++    post({ type: 'done', key, files: index });
++}
+diff --git a/src/web/importer.ts b/src/web/importer.ts
+new file mode 100644
+index 0000000..0567b8b
+--- /dev/null
++++ b/src/web/importer.ts
+@@ -0,0 +1,122 @@
++import { BASE } from './base.ts';
++import type { GameIndex } from './game-index.ts';
++import { gameIsIntact, removeGame, saveGame } from './store.ts';
++const params = new URLSearchParams(location.search);
++export async function ensureGame(): Promise<void> {
++    if (params.has('server')) return;
++    if (!('serviceWorker' in navigator) || !navigator.storage?.getDirectory) {
++        throw new Error('This browser cannot run the web port: it needs service workers and the origin private file system (try a current Chrome, Edge, Firefox or Safari over https).');
++    }
++    if (params.has('reset')) await removeGame();
++    await registerWorker();
++    await startFileProvider();
++    if (!(await gameIsIntact())) await importScreen();
++}
++async function registerWorker(): Promise<void> {
++    const reg = await navigator.serviceWorker.register(BASE + 'sw.js', { scope: BASE });
++    await reg.update().catch(() => {});
++    const next = reg.installing ?? reg.waiting;
++    if (next && next.state !== 'activated') {
++        await Promise.race([
++            new Promise<void>(res => next.addEventListener('statechange', () => { if (next.state === 'activated') res(); })),
++            new Promise<void>(res => setTimeout(res, 8000)),
++        ]);
++    }
++    await navigator.serviceWorker.ready;
++    if (!navigator.serviceWorker.controller) {
++        await Promise.race([
++            new Promise<void>(res => navigator.serviceWorker.addEventListener('controllerchange', () => res(), { once: true })),
++            new Promise<void>(res => setTimeout(res, 3000)),
++        ]);
++        if (!navigator.serviceWorker.controller) {
++            if (sessionStorage.getItem('omori-sw-reload')) throw new Error('The service worker did not take control of the page. Reload, or try another browser.');
++            sessionStorage.setItem('omori-sw-reload', '1');
++            location.reload();
++            await new Promise(() => {});
++        }
++    }
++    sessionStorage.removeItem('omori-sw-reload');
++}
++async function startFileProvider(): Promise<void> {
++    const w = new Worker(BASE + 'file-provider.js');
++    (window as unknown as Record<string, unknown>).__omoriFileProvider = w;
++    await Promise.race([
++        new Promise<void>(res => { w.onmessage = () => res(); }),
++        new Promise<void>(res => setTimeout(res, 3000)),
++    ]);
++}
++const gb = (n: number) => (n / 2 ** 30).toFixed(2) + ' GB';
++function importScreen(): Promise<void> {
++    return new Promise<void>(() => {
++        document.body.innerHTML = `
++<style>
++  #imp{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#000;color:#eee;font:16px/1.5 system-ui,sans-serif;
++       padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(16px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));overflow:auto}
++  #imp main{max-width:34em;width:100%}
++  #imp h1{font-size:1.4em;margin:0 0 .4em}
++  #imp p{margin:.5em 0;color:#bbb}
++  #imp button,#imp .pick{display:inline-block;margin:.8em 0;padding:.8em 1.2em;font:inherit;font-weight:600;color:#000;background:#fff;border:0;border-radius:8px;cursor:pointer}
++  #imp input[type=text]{width:100%;box-sizing:border-box;padding:.6em;font:inherit;font-family:monospace;background:#111;color:#fff;border:1px solid #555;border-radius:6px}
++  #imp progress{width:100%;height:14px}
++  #imp .err{color:#ff8a8a;white-space:pre-wrap}
++  #imp small{color:#888}
++</style>
++<div id="imp"><main>
++  <h1>OpenOMORI</h1>
++  <p>This runs your own copy of OMORI in the browser. Nothing is uploaded: the game is unpacked into this browser's private storage on your device, and it works only with a copy you own.</p>
++  <p>Choose a .zip of your OMORI folder (the one that contains <code>OMORI.exe</code> and <code>www</code>). It needs a few GB of free space, and unpacking takes a few minutes.</p>
++  <label class="pick" id="pickLabel">Choose OMORI zip<input id="file" type="file" accept=".zip,application/zip,application/x-zip-compressed" hidden></label>
++  <div id="status"></div>
++  <progress id="bar" max="1" value="0" hidden></progress>
++  <p class="err" id="err"></p>
++  <div id="keyBox" hidden>
++    <p>The zip has no <code>Launch_OMORI.bat</code> to read the game's decryption key from. Paste the 32-character key from your own launcher (the hex after <code>--</code> in that file):</p>
++    <input id="key" type="text" maxlength="32" spellcheck="false" autocapitalize="off" autocomplete="off">
++    <button id="keyOk">Continue</button>
++  </div>
++  <small>On iPhone and iPad, add this page to your Home Screen after importing so Safari does not clear its storage.</small>
++</main></div>`;
++        const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
++        const status = $('status'), bar = $<HTMLProgressElement>('bar'), err = $('err'), input = $<HTMLInputElement>('file');
++        const finish = async (key: string, files: [string, number][]) => {
++            const g: GameIndex = { version: 1, key, files };
++            await saveGame(g);
++            navigator.serviceWorker.controller?.postMessage({ type: 'game-reload' });
++            location.reload();
++        };
++        input.addEventListener('change', () => {
++            const file = input.files?.[0];
++            if (!file) return;
++            err.textContent = '';
++            $('pickLabel').hidden = true;
++            bar.hidden = false;
++            void navigator.storage.persist?.();
++            status.textContent = 'Reading the zip…';
++            const worker = new Worker(BASE + 'import-worker.js');
++            worker.onmessage = async (e: MessageEvent) => {
++                const m = e.data;
++                if (m.type === 'progress') {
++                    bar.value = m.bytes / m.totalBytes;
++                    status.textContent = `Unpacking ${m.files.toLocaleString()} of ${m.totalFiles.toLocaleString()} files (${gb(m.bytes)} of ${gb(m.totalBytes)})`;
++                } else if (m.type === 'error') {
++                    worker.terminate();
++                    bar.hidden = true; status.textContent = '';
++                    err.textContent = m.message;
++                    $('pickLabel').hidden = false; input.value = '';
++                } else if (m.type === 'done') {
++                    worker.terminate();
++                    status.textContent = 'Done.'; bar.value = 1;
++                    if (m.key) return void finish(m.key, m.files);
++                    $('keyBox').hidden = false;
++                    $('keyOk').onclick = () => {
++                        const k = $<HTMLInputElement>('key').value.trim().toLowerCase();
++                        if (!/^[0-9a-f]{32}$/.test(k)) { err.textContent = 'The key is 32 characters, 0-9 and a-f.'; return; }
++                        void finish(k, m.files);
++                    };
++                }
++            };
++            worker.onerror = ev => { err.textContent = 'The importer crashed: ' + ev.message; };
++            worker.postMessage({ file });
++        });
++    });
++}
+diff --git a/src/web/store.ts b/src/web/store.ts
+new file mode 100644
+index 0000000..fdc4d78
+--- /dev/null
++++ b/src/web/store.ts
+@@ -0,0 +1,18 @@
++import { getMeta, setMeta } from './idb.ts';
++import type { GameIndex } from './game-index.ts';
++const META = 'webGame';
++export const getGame = () => getMeta<GameIndex>(META);
++export const saveGame = (g: GameIndex) => setMeta(META, g);
++export async function gameIsIntact(): Promise<boolean> {
++    const g = await getGame().catch(() => undefined);
++    if (!g?.key || !g.files?.length) return false;
++    try {
++        const dir = await (await navigator.storage.getDirectory()).getDirectoryHandle('game');
++        await dir.getFileHandle('0');
++        return true;
++    } catch { return false; }
++}
++export async function removeGame(): Promise<void> {
++    await (await navigator.storage.getDirectory()).removeEntry('game', { recursive: true }).catch(() => {});
++    await setMeta(META, undefined);
++}
+diff --git a/src/web/touch.ts b/src/web/touch.ts
+new file mode 100644
+index 0000000..769af7b
+--- /dev/null
++++ b/src/web/touch.ts
+@@ -0,0 +1,320 @@
++type Name = 'up' | 'down' | 'left' | 'right' | 'ok' | 'escape' | 'shift' | 'pagedown' | 'tag' | 'import';
++type GroupId = 'pad' | 'ok' | 'escape' | 'shift' | 'pagedown' | 'tag' | 'import';
++const g = globalThis as any;
++const STORE_KEY = 'omori-touch-layout-v1';
++const SCALE_MIN = 0.5, SCALE_MAX = 2, SCALE_STEP = 0.1;
++interface Placed { x: number; y: number; s: number }
++type Layout = Partial<Record<GroupId, Placed>> & { opacity?: number };
++export function isTouchDevice(): boolean {
++    const coarse = !!matchMedia?.('(pointer: coarse)').matches;
++    const ua = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent || '');
++    const ipadOs = navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1;
++    return (coarse || ua || ipadOs) && (navigator.maxTouchPoints || 0) > 0;
++}
++let portrait = false;
++let editing = false;
++const isPortrait = () => isTouchDevice() && innerHeight > innerWidth;
++const set = (name: Name, on: boolean) => { const s = g.Input?._currentState; if (s) s[name] = on; };
++function loadLayout(): Layout {
++    try {
++        const raw = JSON.parse(localStorage.getItem(STORE_KEY) ?? '{}');
++        const out: Layout = {};
++        for (const id of ['pad', 'ok', 'escape', 'shift', 'pagedown', 'tag', 'import'] as GroupId[]) {
++            const p = raw?.[id];
++            if (p && [p.x, p.y, p.s].every(v => typeof v === 'number' && isFinite(v))) out[id] = { x: p.x, y: p.y, s: Math.min(SCALE_MAX, Math.max(SCALE_MIN, p.s)) };
++        }
++        if (typeof raw?.opacity === 'number' && isFinite(raw.opacity)) out.opacity = Math.min(1, Math.max(0.2, raw.opacity));
++        return out;
++    } catch { return {}; }
++}
++function saveLayout(l: Layout): void { try { localStorage.setItem(STORE_KEY, JSON.stringify(l)); } catch {  } }
++export function installTouchControls(): void {
++    const forced = new URLSearchParams(location.search).has('touch');
++    if (!isTouchDevice() && !forced) return;
++    const css = document.createElement('style');
++    css.textContent = `
++#omori-touch{position:fixed;inset:0;z-index:2147483000;pointer-events:none;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
++#omori-touch .grp{position:absolute;transform:translate(-50%,-50%) scale(var(--s,1))}
++#omori-touch .b{box-sizing:border-box;display:flex;align-items:center;justify-content:center;border-radius:50%;opacity:var(--control-opacity,.72);
++  background:rgba(105,110,118,.78);border:2px solid rgba(235,235,235,.9);color:#fff;font:bold calc(var(--u)*.34) system-ui,sans-serif;box-shadow:0 1px 5px #0009;text-shadow:0 1px 2px #000;
++  pointer-events:auto;touch-action:none;-webkit-tap-highlight-color:transparent;width:var(--u);height:var(--u)}
++#omori-touch .b.on{background:rgba(135,140,148,.92)}
++#omori-touch .b.small{width:calc(var(--u)*.78);height:calc(var(--u)*.78);font-size:calc(var(--u)*.28)}
++#omori-touch .pad{pointer-events:auto;touch-action:none;width:calc(var(--u)*3);height:calc(var(--u)*3)}
++#omori-touch .pad .b{position:absolute;pointer-events:none}
++#omori-touch.editing{pointer-events:auto}
++#omori-touch.editing .sel{outline:3px dashed #ffd54a;outline-offset:4px}
++#omori-touch.editing .pad{background:rgba(25,30,40,.48);border-radius:12px}
++#omori-edit{position:absolute;left:50%;transform:translateX(-50%);top:calc(env(safe-area-inset-top) + 8px);display:none;flex-direction:column;align-items:center;gap:8px;
++  pointer-events:auto;background:#000c;border:1px solid #fff5;border-radius:10px;padding:8px 10px;color:#fff;font:13px/1.3 system-ui,sans-serif;text-align:center;max-width:90vw}
++#omori-touch.editing #omori-edit{display:flex}
++#omori-edit .row{display:flex;gap:6px;flex-wrap:wrap;justify-content:center}
++#omori-edit .opacity-row{display:flex;align-items:center;gap:8px;white-space:nowrap}
++#omori-edit input[type=range]{width:min(42vw,180px);accent-color:#8da8c8;touch-action:pan-y}
++#omori-edit button{font:inherit;font-weight:600;color:#fff;background:#2a4f7c;border:1px solid #4a7fb5;border-radius:6px;padding:7px 12px;min-height:36px;-webkit-appearance:none;appearance:none;touch-action:manipulation}
++#omori-edit button.go{background:#2b7a3d;border-color:#58b36d}
++#omori-rotate{position:fixed;inset:0;z-index:2147483001;display:none;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;
++  text-align:center;color:#fff;background:#000;touch-action:none;font:20px/1.4 -apple-system,Helvetica,Arial,sans-serif;user-select:none;-webkit-user-select:none}
++html.omori-portrait #omori-rotate{display:flex}
++html.omori-portrait canvas,html.omori-portrait #omori-touch{visibility:hidden}`;
++    document.head.append(css);
++    const root = document.createElement('div');
++    root.id = 'omori-touch';
++    interface Group { id: GroupId; el: HTMLElement; half: number; home: (m: Metrics) => [number, number] }
++    interface Metrics { W: number; H: number; L: number; R: number; T: number; B: number; u: number }
++    const groups: Group[] = [];
++    const arrows = {} as Record<'up' | 'down' | 'left' | 'right', HTMLElement>;
++    const pad = document.createElement('div');
++    pad.className = 'pad grp';
++    for (const [n, label, pos] of [
++        ['up', '▲', 'left:var(--u);top:0'], ['left', '◀', 'left:0;top:var(--u)'],
++        ['right', '▶', 'left:calc(var(--u)*2);top:var(--u)'], ['down', '▼', 'left:var(--u);top:calc(var(--u)*2)'],
++    ] as const) {
++        const el = document.createElement('div');
++        el.className = 'b'; el.textContent = label; el.style.cssText = pos;
++        pad.append(el); arrows[n] = el;
++    }
++    root.append(pad);
++    groups.push({ id: 'pad', el: pad, half: 1.5, home: m => [m.L + 1.9 * m.u, m.H - m.B - 1.9 * m.u] });
++    const round: { name: Name; el: HTMLElement }[] = [];
++    const add = (id: GroupId & Name, label: string, half: number, home: Group['home'], small = false, fs = '') => {
++        const el = document.createElement('div');
++        el.className = 'b grp' + (small ? ' small' : '');
++        el.textContent = label; if (fs) el.style.fontSize = fs;
++        root.append(el); round.push({ name: id, el }); groups.push({ id, el, half, home });
++    };
++    add('ok', 'A', 0.5, m => [m.W - m.R - 0.9 * m.u, m.H - m.B - 1.65 * m.u]);
++    add('escape', 'B', 0.5, m => [m.W - m.R - 2.05 * m.u, m.H - m.B - 0.9 * m.u]);
++    add('shift', 'RUN', 0.5, m => [m.W - m.R - 2.05 * m.u, m.H - m.B - 2.05 * m.u], false, 'calc(var(--u)*.26)');
++    add('pagedown', 'W', 0.39, m => [m.W - m.R - 0.79 * m.u, m.T + 0.64 * m.u], true);
++    add('tag', 'TAG', 0.39, m => [m.W - m.R - 0.79 * m.u, m.H - m.B - 0.9 * m.u], true, 'calc(var(--u)*.23)');
++    add('import', 'IMPORT', 0.43, m => [m.L + 0.65 * m.u, m.T + 0.75 * m.u], true, 'calc(var(--u)*.2)');
++    const gear = document.createElement('div');
++    gear.className = 'b small';
++    gear.textContent = 'E'; gear.setAttribute('aria-label', 'Edit touch layout');
++    gear.style.position = 'absolute';
++    root.append(gear);
++    const bar = document.createElement('div');
++    bar.id = 'omori-edit';
++    const hint = document.createElement('div');
++    const row = document.createElement('div'); row.className = 'row';
++    const opacityRow = document.createElement('label');
++    opacityRow.className = 'opacity-row';
++    opacityRow.textContent = 'Opacity';
++    const opacitySlider = document.createElement('input');
++    opacitySlider.type = 'range'; opacitySlider.min = '0.2'; opacitySlider.max = '1';
++    opacitySlider.step = '0.05'; opacitySlider.value = '0.72';
++    opacitySlider.setAttribute('aria-label', 'Touch control opacity');
++    opacityRow.append(opacitySlider);
++    const mk = (label: string, fn: () => void, cls = '') => {
++        const b = document.createElement('button'); b.type = 'button'; b.textContent = label; if (cls) b.className = cls;
++        let armed = -1;
++        b.addEventListener('pointerdown', e => { e.stopPropagation(); armed = e.pointerId; });
++        b.addEventListener('pointerleave', e => { if (armed === e.pointerId) armed = -1; });
++        b.addEventListener('pointercancel', () => { armed = -1; });
++        b.addEventListener('pointerup', e => { e.stopPropagation(); e.preventDefault(); if (armed === e.pointerId) { armed = -1; fn(); } });
++        row.append(b); return b;
++    };
++    bar.append(hint, opacityRow, row);
++    root.append(bar);
++    document.body.append(root);
++    let saved = loadLayout();
++    let draft: Layout = {};
++    let selected: GroupId | null = null;
++    const probe = document.createElement('div');
++    probe.style.cssText = 'position:fixed;visibility:hidden;pointer-events:none;left:0;top:0;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)';
++    document.body.append(probe);
++    const metrics = (): Metrics => {
++        const cs = getComputedStyle(probe);
++        const short = Math.min(innerWidth, innerHeight), long = Math.max(innerWidth, innerHeight);
++        const u = Math.max(40, Math.min(74, short * 0.15, long * 0.1));
++        return { W: innerWidth, H: innerHeight, L: parseFloat(cs.paddingLeft) || 0, R: parseFloat(cs.paddingRight) || 0, T: parseFloat(cs.paddingTop) || 0, B: parseFloat(cs.paddingBottom) || 0, u };
++    };
++    const current = (id: GroupId): Placed | undefined => (editing ? draft[id] : saved[id]);
++    const clampPos = (m: Metrics, cx: number, cy: number, half: number) => {
++        const h = half * m.u;
++        return [Math.min(m.W - m.R - h, Math.max(m.L + h, cx)), Math.min(m.H - m.B - h, Math.max(m.T + h, cy))] as const;
++    };
++    const layout = () => {
++        const m = metrics();
++        root.style.setProperty('--u', m.u + 'px');
++        const opacity = (editing ? draft.opacity : saved.opacity) ?? 0.72;
++        root.style.setProperty('--control-opacity', String(opacity));
++        opacitySlider.value = String(opacity);
++        for (const gr of groups) {
++            const p = current(gr.id);
++            const s = p?.s ?? 1;
++            const [hx, hy] = gr.home(m);
++            const [x, y] = clampPos(m, p ? p.x * m.W : hx, p ? p.y * m.H : hy, gr.half * s);
++            gr.el.style.left = x + 'px'; gr.el.style.top = y + 'px';
++            gr.el.style.setProperty('--s', String(s));
++        }
++        gear.style.left = m.L + 0.4 * m.u + 'px';
++        gear.style.top = m.T + 0.25 * m.u + 'px';
++        for (const gr of groups) gr.el.classList.toggle('sel', editing && gr.id === selected);
++    };
++    const owner = new Map<number, 'pad' | 'btn'>();
++    const down = new Map<number, Set<Name>>();
++    const lit = new Set<Name>();
++    const padDirs = (x: number, y: number): Set<Name> => {
++        const r = pad.getBoundingClientRect(), dx = x - (r.left + r.width / 2), dy = y - (r.top + r.height / 2);
++        const dist = Math.hypot(dx, dy), out = new Set<Name>();
++        if (dist < r.width * 0.1) return out;
++        const ax = dx / dist, ay = dy / dist;
++        if (ax < -0.38) out.add('left'); else if (ax > 0.38) out.add('right');
++        if (ay < -0.38) out.add('up'); else if (ay > 0.38) out.add('down');
++        return out;
++    };
++    const buttonAt = (x: number, y: number): Name | null => {
++        let best: Name | null = null, bestD = Infinity;
++        for (const b of round) {
++            const r = b.el.getBoundingClientRect(), d = Math.hypot(x - (r.left + r.width / 2), y - (r.top + r.height / 2));
++            if (d <= (r.width / 2) * 1.25 && d < bestD) { best = b.name; bestD = d; }
++        }
++        return best;
++    };
++    const apply = () => {
++        const want = new Set<Name>();
++        for (const s of down.values()) for (const n of s) if (n !== 'import') want.add(n);
++        for (const n of want) if (!lit.has(n)) set(n, true);
++        for (const n of lit) if (!want.has(n)) set(n, false);
++        lit.clear(); for (const n of want) lit.add(n);
++        for (const [n, el] of Object.entries(arrows)) el.classList.toggle('on', want.has(n as Name));
++        for (const b of round) b.el.classList.toggle('on', want.has(b.name));
++    };
++    const releaseAll = () => { down.clear(); owner.clear(); apply(); };
++    const lockOrientation = () => { try { void (screen.orientation as any)?.lock?.('landscape')?.catch?.(() => {}); } catch {  } };
++    let drag: { id: GroupId; pointer: number; dx: number; dy: number } | null = null;
++    const groupAt = (t: EventTarget | null) => groups.find(gr => gr.el === t || gr.el.contains(t as Node));
++    const place = (id: GroupId, cx: number, cy: number, s: number) => { const m = metrics(); draft[id] = { x: cx / m.W, y: cy / m.H, s }; };
++    const centreOf = (gr: Group) => { const r = gr.el.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2] as const; };
++    const freeze = () => {
++        for (const gr of groups) if (!draft[gr.id]) { const [cx, cy] = centreOf(gr); place(gr.id, cx, cy, 1); }
++    };
++    const updateHint = () => {
++        hint.textContent = selected
++            ? 'Drag to move. − / + resize the selected control. Tap empty space to select all.'
++            : 'Drag a control to move it. Tap one, then − / + to resize it (or resize all).';
++    };
++    const resize = (delta: number) => {
++        freeze();
++        for (const gr of groups) {
++            if (selected && gr.id !== selected) continue;
++            const p = draft[gr.id]!; const m = metrics();
++            const s = Math.min(SCALE_MAX, Math.max(SCALE_MIN, Math.round((p.s + delta) * 10) / 10));
++            const [x, y] = clampPos(m, p.x * m.W, p.y * m.H, gr.half * s);
++            draft[gr.id] = { x: x / m.W, y: y / m.H, s };
++        }
++        layout();
++    };
++    const openEditor = () => {
++        if (editing || portrait) return;
++        releaseAll();
++        editing = true; selected = null;
++        draft = JSON.parse(JSON.stringify(saved));
++        root.classList.add('editing');
++        updateHint(); layout();
++    };
++    const closeEditor = (keep: boolean) => {
++        if (!editing) return;
++        if (keep) { freeze(); saved = draft; saveLayout(saved); }
++        editing = false; drag = null; selected = null; draft = {};
++        root.classList.remove('editing');
++        layout();
++    };
++    opacitySlider.addEventListener('input', () => { draft.opacity = Number(opacitySlider.value); layout(); });
++    mk('−', () => resize(-SCALE_STEP));
++    mk('+', () => resize(SCALE_STEP));
++    mk('RESET', () => { draft = {}; layout(); });
++    mk('CANCEL', () => closeEditor(false));
++    mk('DONE', () => closeEditor(true), 'go');
++    gear.addEventListener('pointerdown', e => { e.stopPropagation(); });
++    gear.addEventListener('pointerup', e => { e.stopPropagation(); e.preventDefault(); openEditor(); });
++    root.addEventListener('pointerdown', (e: PointerEvent) => {
++        e.stopPropagation();
++        if (portrait) return;
++        const t = e.target as HTMLElement;
++        if (t === gear) return;
++        e.preventDefault();
++        if (editing) {
++            const gr = groupAt(t);
++            if (!gr) { if (!bar.contains(t)) { selected = null; updateHint(); layout(); } return; }
++            freeze();
++            selected = gr.id; updateHint();
++            const [cx, cy] = centreOf(gr);
++            drag = { id: gr.id, pointer: e.pointerId, dx: e.clientX - cx, dy: e.clientY - cy };
++            try { gr.el.setPointerCapture(e.pointerId); } catch {  }
++            layout();
++            return;
++        }
++        if (pad.contains(t)) {
++            owner.set(e.pointerId, 'pad'); down.set(e.pointerId, padDirs(e.clientX, e.clientY));
++        } else {
++            const n = round.find(b => b.el === t || b.el.contains(t))?.name ?? null;
++            if (!n) return;
++            if (n === 'import') { window.dispatchEvent(new Event('omori-import-save')); return; }
++            owner.set(e.pointerId, 'btn'); down.set(e.pointerId, new Set([n]));
++        }
++        try { t.setPointerCapture(e.pointerId); } catch {  }
++        lockOrientation();
++        apply();
++    });
++    root.addEventListener('pointermove', (e: PointerEvent) => {
++        e.stopPropagation();
++        if (editing) {
++            if (!drag || drag.pointer !== e.pointerId) return;
++            e.preventDefault();
++            const gr = groups.find(x => x.id === drag!.id)!, m = metrics(), s = draft[gr.id]!.s;
++            const [x, y] = clampPos(m, e.clientX - drag.dx, e.clientY - drag.dy, gr.half * s);
++            place(gr.id, x, y, s); layout();
++            return;
++        }
++        const o = owner.get(e.pointerId);
++        if (!o) return;
++        e.preventDefault();
++        if (o === 'pad') down.set(e.pointerId, padDirs(e.clientX, e.clientY));
++        else { const n = buttonAt(e.clientX, e.clientY); down.set(e.pointerId, n ? new Set([n]) : new Set()); }
++        apply();
++    });
++    const up = (e: PointerEvent) => {
++        e.stopPropagation();
++        if (drag && drag.pointer === e.pointerId) { drag = null; return; }
++        if (!owner.has(e.pointerId)) return;
++        e.preventDefault(); owner.delete(e.pointerId); down.delete(e.pointerId); apply();
++    };
++    root.addEventListener('pointerup', up);
++    root.addEventListener('pointercancel', up);
++    root.addEventListener('contextmenu', e => e.preventDefault());
++    for (const t of ['touchstart', 'touchmove', 'touchend', 'touchcancel', 'mousedown', 'mousemove', 'mouseup', 'click', 'wheel'])
++        root.addEventListener(t, e => e.stopPropagation(), { passive: true });
++    document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAll(); });
++    const rot = document.createElement('div');
++    rot.id = 'omori-rotate';
++    rot.textContent = 'Please rotate your device';
++    document.body.append(rot);
++    const audio = (muted: boolean) => {
++        try { g.Howler?.mute?.(muted); } catch {  }
++        try { const c = g.WebAudio?._context as AudioContext | undefined; void (muted ? c?.suspend?.() : c?.resume?.()); } catch {  }
++        try { document.querySelectorAll('audio,video').forEach(m => { (m as HTMLMediaElement).muted = muted; }); } catch {  }
++    };
++    const update = () => {
++        layout();
++        const p = isPortrait();
++        if (p === portrait) return;
++        portrait = p;
++        document.documentElement.classList.toggle('omori-portrait', p);
++        if (p) { releaseAll(); closeEditor(false); }
++        audio(p);
++    };
++    addEventListener('resize', update);
++    addEventListener('orientationchange', () => { update(); setTimeout(update, 150); setTimeout(update, 500); });
++    update();
++    const hook = setInterval(() => {
++        const SM = g.SceneManager;
++        if (!SM?.updateScene || !SM._scene || !SM._sceneStarted) return;
++        clearInterval(hook);
++        const stock = SM.updateScene;
++        SM.updateScene = function (this: unknown, ...a: unknown[]) { if (!portrait && !editing) return stock.apply(this, a); };
++    }, 100);
++    lockOrientation();
++}
+diff --git a/src/web/zip.test.ts b/src/web/zip.test.ts
+new file mode 100644
+index 0000000..cde572f
+--- /dev/null
++++ b/src/web/zip.test.ts
+@@ -0,0 +1,47 @@
++import { describe, expect, test } from 'bun:test';
++import { zipSync } from 'fflate';
++import { buildLookup } from './game-index.ts';
++import { extractKey, findGameRoot, readCentralDirectory, readEntry } from './zip.ts';
++const enc = (s: string) => new TextEncoder().encode(s);
++const KEY = '0123456789abcdef0123456789abcdef';
++const sample = () => zipSync({
++    'OMORI/Launch_OMORI.bat': [enc(`start nw.exe . --${KEY}`), { level: 0 }],
++    'OMORI/OMORI.exe': [enc('MZ'), { level: 0 }],
++    'OMORI/www/js/rpg_core.js': [enc('// core '.repeat(200)), { level: 6 }],
++    'OMORI/www/Languages/en/1.HERO': [enc('hello'), { level: 0 }],
++    'OMORI/www/img/pictures/a%b.rpgmvp': [new Uint8Array([1, 2, 3]), { level: 0 }],
++});
++describe('zip reader', () => {
++    test('lists entries and reads stored and deflated data', async () => {
++        const file = new Blob([sample()]);
++        const entries = await readCentralDirectory(file);
++        expect(entries.map(e => e.name).sort()).toContain('OMORI/www/js/rpg_core.js');
++        const core = entries.find(e => e.name.endsWith('rpg_core.js'))!;
++        if (typeof DecompressionStream !== 'undefined') expect(new TextDecoder().decode(await readEntry(file, core))).toBe('// core '.repeat(200));
++        const bat = entries.find(e => e.name.endsWith('.bat'))!;
++        expect(extractKey(new TextDecoder().decode(await readEntry(file, bat)))).toBe(KEY);
++    });
++    test('finds the game inside a wrapping folder, or www on its own', () => {
++        expect(findGameRoot(['OMORI/www/js/rpg_core.js', 'OMORI/OMORI.exe'])).toEqual({ prefix: 'omori/www/', root: 'omori/' });
++        expect(findGameRoot(['js/rpg_core.js', 'data/System.KEL'])).toEqual({ prefix: '', root: null });
++        expect(findGameRoot(['www/js/rpg_core.js.bak', 'readme.txt'])).toBeNull();
++    });
++    test('rejects things that are not zips', async () => {
++        await expect(readCentralDirectory(new Blob([enc('not a zip file at all, just some text here')]))).rejects.toThrow();
++    });
++});
++describe('game index', () => {
++    const files: [string, number][] = [['Languages/en/1.HERO', 5], ['js/rpg_core.js', 9], ['img/a%b.rpgmvp', 3]];
++    const lookup = buildLookup(files);
++    test('matches paths case-insensitively', () => {
++        expect(lookup.find('languages/EN/1.hero')).toBe(0);
++        expect(lookup.find('/js/rpg_core.js')).toBe(1);
++        expect(lookup.find('img/a%b.rpgmvp')).toBe(2);
++        expect(lookup.find('nope')).toBeUndefined();
++    });
++    test('lists folders with their real names', () => {
++        expect(lookup.list('')!.sort()).toEqual(['Languages', 'img', 'js']);
++        expect(lookup.list('languages')).toEqual(['en']);
++        expect(lookup.list('js/rpg_core.js')).toBeNull();
++    });
++});
+diff --git a/src/web/zip.ts b/src/web/zip.ts
+new file mode 100644
+index 0000000..0b75a3d
+--- /dev/null
++++ b/src/web/zip.ts
+@@ -0,0 +1,77 @@
++export interface ZipEntry {
++    name: string;
++    method: number;
++    csize: number;
++    usize: number;
++    offset: number;
++}
++const SIG_EOCD = 0x06054b50, SIG_EOCD64 = 0x06064b50, SIG_LOC64 = 0x07064b50, SIG_CEN = 0x02014b50, SIG_LOCAL = 0x04034b50;
++const u16 = (v: DataView, o: number) => v.getUint16(o, true);
++const u32 = (v: DataView, o: number) => v.getUint32(o, true);
++const u64 = (v: DataView, o: number) => Number(v.getBigUint64(o, true));
++const view = (b: ArrayBuffer) => new DataView(b);
++export async function readCentralDirectory(file: Blob): Promise<ZipEntry[]> {
++    const size = file.size;
++    if (size < 22) throw new Error('That file is too small to be a zip.');
++    const tailStart = Math.max(0, size - (0xffff + 22));
++    const tail = view(await file.slice(tailStart, size).arrayBuffer());
++    let eocd = -1;
++    for (let i = tail.byteLength - 22; i >= 0; i--) if (u32(tail, i) === SIG_EOCD) { eocd = i; break; }
++    if (eocd < 0) throw new Error('That does not look like a zip file (no end-of-archive record).');
++    let count = u16(tail, eocd + 10), cdSize = u32(tail, eocd + 12), cdOffset = u32(tail, eocd + 16);
++    if (count === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) {
++        const loc = eocd - 20;
++        if (loc < 0 || u32(tail, loc) !== SIG_LOC64) throw new Error('Zip64 archive without a Zip64 locator.');
++        const z64 = view(await file.slice(u64(tail, loc + 8), u64(tail, loc + 8) + 56).arrayBuffer());
++        if (u32(z64, 0) !== SIG_EOCD64) throw new Error('Corrupt Zip64 end-of-archive record.');
++        count = u64(z64, 32); cdSize = u64(z64, 40); cdOffset = u64(z64, 48);
++    }
++    const buf = await file.slice(cdOffset, cdOffset + cdSize).arrayBuffer();
++    const cd = view(buf), bytes = new Uint8Array(buf), dec = new TextDecoder();
++    const out: ZipEntry[] = [];
++    let o = 0;
++    while (o + 46 <= cd.byteLength && u32(cd, o) === SIG_CEN) {
++        const method = u16(cd, o + 10);
++        let csize = u32(cd, o + 20), usize = u32(cd, o + 24), offset = u32(cd, o + 42);
++        const nlen = u16(cd, o + 28), elen = u16(cd, o + 30), clen = u16(cd, o + 32);
++        const name = dec.decode(bytes.subarray(o + 46, o + 46 + nlen));
++        for (let e = o + 46 + nlen, end = e + elen; e + 4 <= end;) {
++            const id = u16(cd, e), len = u16(cd, e + 2);
++            if (id === 1) {
++                let p = e + 4;
++                if (usize === 0xffffffff) { usize = u64(cd, p); p += 8; }
++                if (csize === 0xffffffff) { csize = u64(cd, p); p += 8; }
++                if (offset === 0xffffffff) { offset = u64(cd, p); p += 8; }
++            }
++            e += 4 + len;
++        }
++        out.push({ name, method, csize, usize, offset });
++        o += 46 + nlen + elen + clen;
++    }
++    if (out.length !== count) throw new Error(`Zip directory is damaged (expected ${count} entries, read ${out.length}).`);
++    return out;
++}
++export async function openEntry(file: Blob, e: ZipEntry): Promise<ReadableStream<Uint8Array>> {
++    const head = view(await file.slice(e.offset, e.offset + 30).arrayBuffer());
++    if (head.byteLength < 30 || u32(head, 0) !== SIG_LOCAL) throw new Error(`Corrupt zip entry: ${e.name}`);
++    const start = e.offset + 30 + u16(head, 26) + u16(head, 28);
++    const raw = file.slice(start, start + e.csize).stream() as ReadableStream<Uint8Array>;
++    if (e.method === 0) return raw;
++    if (e.method === 8) return raw.pipeThrough(new DecompressionStream('deflate-raw') as unknown as ReadableWritablePair<Uint8Array, Uint8Array>);
++    throw new Error(`Unsupported compression method ${e.method} for ${e.name}`);
++}
++export async function readEntry(file: Blob, e: ZipEntry): Promise<Uint8Array> {
++    return new Uint8Array(await new Response(await openEntry(file, e)).arrayBuffer());
++}
++export function findGameRoot(names: string[]): { prefix: string; root: string | null } | null {
++    for (const marker of ['www/js/rpg_core.js', 'js/rpg_core.js']) {
++        for (const n of names) {
++            const l = n.toLowerCase();
++            const i = l.lastIndexOf(marker);
++            if (i < 0 || l.length !== i + marker.length || (i > 0 && l[i - 1] !== '/')) continue;
++            return marker.startsWith('www/') ? { prefix: l.slice(0, i) + 'www/', root: l.slice(0, i) } : { prefix: l.slice(0, i), root: null };
++        }
++    }
++    return null;
++}
++export const extractKey = (text: string): string | null => /--([0-9a-f]{32})/i.exec(text)?.[1]?.toLowerCase() ?? null;
