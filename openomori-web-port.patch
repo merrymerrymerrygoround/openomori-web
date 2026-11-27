@@ -3376,20 +3376,21 @@ new file mode 100644
 index 0000000..a47ba7b
 --- /dev/null
 +++ b/src/client/save-import.ts
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,61 @@
 +import { fs } from './shim/fs.ts';
 +
-+const SAVE_NAME = /^file(\d+)\.rpgsave$/i;
++// fileN.rpgsave are the slots; global.rpgsave (id 0) is the index the load screen builds its slot list from.
++const SAVE_NAME = /^(?:file(\d+)|global)\.rpgsave$/i;
 +let pending: HTMLInputElement | null = null;
 +
 +/** Where the game itself looks for save `name`, so imported files land exactly where it will read them. */
 +function savePath(name: string): string {
-+    const id = Number(SAVE_NAME.exec(name)![1]);
++    const id = Number(SAVE_NAME.exec(name)![1] ?? 0);
 +    try {
 +        const p = (globalThis as any).StorageManager?.localFilePath?.(id);
 +        if (typeof p === 'string' && p) return p;
 +    } catch { /* fall back to the default below */ }
-+    return `/save/file${id}.rpgsave`;
++    return id ? `/save/file${id}.rpgsave` : '/save/global.rpgsave';
 +}
 +
 +export function installSaveImporter(): void {
@@ -3407,7 +3408,7 @@ index 0000000..a47ba7b
 +                const files = [...(input.files ?? [])];
 +                if (!files.length) return;
 +                if (files.some(f => !SAVE_NAME.test(f.name))) {
-+                    alert('Choose OMORI save files named file1.rpgsave, file2.rpgsave, and so on.');
++                    alert('Choose OMORI save files from its save folder: global.rpgsave and file1.rpgsave, file2.rpgsave, and so on.');
 +                    return;
 +                }
 +                if (!confirm(`Import ${files.length} save file(s)? Files with matching names will be replaced.`)) return;
@@ -3418,7 +3419,11 @@ index 0000000..a47ba7b
 +                        if (dir) fs.mkdirSync(dir);
 +                        fs.writeFileSync(p, bytes);
 +                    }
-+                    alert(`Imported ${files.length} save file(s). Return to the title screen to load them.`);
++                    const ids = files.map(f => Number(SAVE_NAME.exec(f.name)![1] ?? 0)).filter(Boolean);
++                    const info = (globalThis as any).DataManager?.loadGlobalInfo?.();
++                    const hidden = ids.filter(id => !info?.[id]);
++                    alert(`Imported ${files.length} save file(s). Return to the title screen to load them.` + (hidden.length
++                        ? `\n\nSlot(s) ${hidden.join(', ')} will look empty until you also import global.rpgsave from the same save folder.` : ''));
 +                } catch (e) { alert(`Could not import saves: ${(e as Error).message}`); }
 +            } finally { done(); }
 +        };
