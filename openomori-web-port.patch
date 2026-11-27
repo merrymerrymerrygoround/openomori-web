@@ -1,5 +1,5 @@
 diff --git a/build.ts b/build.ts
-index df9e662..c368dca 100644
+index df9e662..f0e8bb3 100644
 --- a/build.ts
 +++ b/build.ts
 @@ -1,5 +1,4 @@
@@ -8,7 +8,7 @@ index df9e662..c368dca 100644
  // Bundles the browser client (shim + display layer + loader) into dist/app.js.
  const result = await Bun.build({
      entrypoints: ['src/client/entry.ts'],
-@@ -31,7 +29,18 @@ if (!sw.success) {
+@@ -31,7 +30,18 @@ if (!sw.success) {
  }
  console.log(`built dist/sw.js (${(sw.outputs[0]!.size / 1024).toFixed(0)} KB)`);
  
@@ -59,7 +59,7 @@ index f858c27..0802bd6 100644
      <meta name="color-scheme" content="dark">
      <link rel="icon" href="icon/icon.png" type="image/png">
      <link rel="preload" href="fonts/gamefont.css" as="style">
-@@ -14,6 +18,6 @@
+@@ -14,6 +16,6 @@
      </style>
  </head>
  <body>
@@ -68,12 +68,12 @@ index f858c27..0802bd6 100644
  </body>
  </html>
 diff --git a/src/client/boot.ts b/src/client/boot.ts
-index fe97c0b..c226a14 100644
+index fe97c0b..a169219 100644
 --- a/src/client/boot.ts
 +++ b/src/client/boot.ts
-@@ -3,12 +3,9 @@ import { installCutsceneLayout } from './cutscene.ts';
- import { installBeatRecorder, installCheckpointApi } from './checkpoints.ts';
- import { installDebug } from './debug.ts';
+@@ -3,12 +3,7 @@ import { installCutsceneLayout } from './cutscene.ts';
+-import { installBeatRecorder, installCheckpointApi } from './checkpoints.ts';
+-import { installDebug } from './debug.ts';
  import { installDisplay } from './display.ts';
 -import { installGameEvents, installErrorCapture } from './mods/api.ts';
 -import { initMods, patchPlugins, runPhase } from './mods/runtime.ts';
@@ -85,7 +85,7 @@ index fe97c0b..c226a14 100644
  
  const LIBS = ['pixi', 'pixi-tilemap', 'pixi-picture', 'lz-string', 'iphone-inline-video.browser'].map(n => `js/libs/${n}.js`);
  const CORE = ['rpg_core', 'rpg_managers', 'rpg_objects', 'rpg_scenes', 'rpg_sprites', 'rpg_windows', 'plugins'].map(n => `js/${n}.js`);
-@@ -36,42 +30,19 @@ async function warmCache(): Promise<void> {
+@@ -36,42 +33,16 @@ async function warmCache(): Promise<void> {
  
  export async function boot(): Promise<void> {
      const mark = (n: string) => performance.mark(`omori:${n}`);
@@ -104,12 +104,12 @@ index fe97c0b..c226a14 100644
      PluginManager.setup($plugins);   // plugins (and their Graphics overrides) load synchronously here
      mark("plugins");
 -    installGameEvents();
-     installCheckpointApi();
-     installBeatRecorder();
+-    installCheckpointApi();
+-    installBeatRecorder();
 -    await runPhase('post-plugins');  // mod scripts: the game's classes exist, nothing has started
      installDisplay();                // must run after plugins so it wins over YEP_CoreEngine
      installCutsceneLayout();
-     installDebug();
+-    installDebug();
 -    installSettings();               // replaces the game's options screens; after plugins so ConfigManager is final
 +    if (new URLSearchParams(location.search).get('newsettings') === '1') installSettings();
      SceneManager.run(Scene_Boot);
@@ -130,30 +130,8 @@ index fe97c0b..c226a14 100644
 -        } catch { /* server restarting */ }
 -    }, 1000);
  }
-diff --git a/src/client/checkpoints.ts b/src/client/checkpoints.ts
-index dfcf8e3..ce3087b 100644
---- a/src/client/checkpoints.ts
-+++ b/src/client/checkpoints.ts
-@@ -4,7 +4,6 @@
- // Also here: the "story beat" recorder (auto-checkpoints the first time each story switch turns on) and
- // checkpoints shipped by mods (OmoriMod.checkpoints.register).
- import { diffDigests, makeDigest, type Change, type Digest } from './checkpoint-core.ts';
--import { getActiveProfile } from './mods/store.ts';
- import { portValue, register } from './settings/registry.ts';
- import type { StoryIndex } from '../mods/storyscan.ts';
- import { ENDING_FLAGS, PHASE_FLAGS, SPINE_SWITCH, coverage, describe, routeKey, routeLabel, signature } from './story-model.ts';
-@@ -30,8 +28,7 @@ let dbPromise: Promise<IDBDatabase> | null = null;
- async function db(): Promise<IDBDatabase> {
-     if (!dbPromise) {
-         dbPromise = (async () => {
--            const p = await getActiveProfile().catch(() => null);
--            const name = 'omori-checkpoints' + (p && p.id !== 'default' ? ':' + p.id : '');
-+            const name = 'omori-checkpoints';
-             return new Promise<IDBDatabase>((res, rej) => {
-                 const r = indexedDB.open(name, 1);
-                 r.onupgradeneeded = () => r.result.createObjectStore(STORE, { keyPath: 'id' });
 diff --git a/src/client/display.ts b/src/client/display.ts
-index f8d1a89..7915c1c 100644
+index f8d1a89..bc710b0 100644
 --- a/src/client/display.ts
 +++ b/src/client/display.ts
 @@ -11,8 +11,7 @@
@@ -166,7 +144,7 @@ index f8d1a89..7915c1c 100644
  
  export interface DisplayOptions {
      /** Max internal render multiplier (1..4). `?q=` in the URL overrides it. */
-@@ -23,7 +22,7 @@
+@@ -23,7 +22,7 @@ export interface DisplayOptions {
   * Live display preferences, changed by the settings screen. The URL (`?q=`, `?wide=0`) still wins, so tests and
   * bookmarks behave exactly as before. `quality` 0 means "automatic" (up to the default max).
   */
@@ -175,7 +153,7 @@ index f8d1a89..7915c1c 100644
  
  export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): void {
      const G = Graphics;
-@@ -126,40 +125,22 @@
+@@ -126,40 +125,22 @@ export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): voi
      };
  
      // ---- bar colour ----------------------------------------------------------------------
@@ -223,7 +201,7 @@ index f8d1a89..7915c1c 100644
          const horizontal = innerWidth / innerHeight >= G._width / G._height; // bars left/right vs top/bottom
          const cw = G._width * G._realScale, ch = G._height * G._realScale;
          const gx = (innerWidth - cw) / 2, gy = (innerHeight - ch) / 2;       // the bars are what's outside the canvas
-@@ -167,13 +148,11 @@
+@@ -167,13 +148,11 @@ export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): voi
          if (horizontal) {
              place(first, 0, 0, Math.ceil(gx) + 1, innerHeight);
              place(second, Math.floor(gx + cw) - 1, 0, innerWidth - Math.floor(gx + cw) + 1, innerHeight);
@@ -240,7 +218,7 @@ index f8d1a89..7915c1c 100644
      }
  
 diff --git a/src/client/entry.ts b/src/client/entry.ts
-index 95ea58c..9ac58a9 100644
+index 95ea58c..5f7a2cf 100644
 --- a/src/client/entry.ts
 +++ b/src/client/entry.ts
 @@ -1,7 +1,53 @@
@@ -1755,7 +1733,7 @@ index ebce4ad..0000000
 -    body.replaceChildren(...kids);
 -}
 diff --git a/src/client/settings/builtin.ts b/src/client/settings/builtin.ts
-index 9e1d08c..c1cc7d6 100644
+index 9e1d08c..31def37 100644
 --- a/src/client/settings/builtin.ts
 +++ b/src/client/settings/builtin.ts
 @@ -25,7 +25,6 @@ export interface Actions {
@@ -1766,7 +1744,25 @@ index 9e1d08c..c1cc7d6 100644
      loadGame(): void;
      toTitle(): void;
      reduceMotion(): void;
-@@ -115,8 +113,6 @@ export function registerBuiltin(a: Actions) {
+@@ -37,7 +36,7 @@ export function registerBuiltin(a: Actions) {
+ 
+     // ---- ports: these are this browser build's own features
+     const quality = portValue<number>('quality', 0, v => { displayPrefs.quality = v; F.applyDisplay(); });
+-    const wide = portValue<boolean>('wide', true, v => { displayPrefs.wide = v; });
++    const wide = portValue<boolean>('wide', false, v => { displayPrefs.wide = v; });
+     const smooth = portValue<boolean>('smooth', true, v => { displayPrefs.smooth = v; F.applyDisplay(); });
+     const fps = portValue<boolean>('showFps', false, F.setShowFps);
+     const cursor = portValue<boolean>('hideCursor', false, F.setHideCursor);
+@@ -75,7 +74,7 @@ export function registerBuiltin(a: Actions) {
+         // ---------------------------------------------------------- display
+         { id: 'fullscreen', tab: 'display', group: 'Window', label: 'Fullscreen', default: false, keywords: 'window screen',
+           control: { type: 'toggle', get: () => F.isFullscreen(), set: v => { C().fullScreen = v; F.setFullscreen(v); scheduleSave(); notify(); } } },
+-        { id: 'wide', tab: 'display', group: 'Window', label: 'Widescreen maps', help: 'Show more of the world at the sides on wide windows. Menus and battles always stay 4:3.', default: true, keywords: 'ultrawide aspect ratio',
++        { id: 'wide', tab: 'display', group: 'Window', label: 'Widescreen maps', help: 'Show more of the world at the sides on wide windows. Menus and battles always stay 4:3.', default: false, keywords: 'ultrawide aspect ratio',
+           note: () => (g.SceneManager?._scene instanceof g.Scene_Map ? 'Applies on the next map you enter.' : undefined), control: { type: 'toggle', get: wide.get, set: wide.set } },
+         { id: 'quality', tab: 'display', group: 'Picture', label: 'Render quality', help: 'Internal resolution. Higher is sharper but needs a stronger GPU. Automatic picks the best for your window.', default: 0, keywords: 'resolution supersampling performance',
+           control: { type: 'choice', options: choices([0, 'Automatic'], [1, '1x'], [2, '2x'], [3, '3x'], [4, '4x']), get: quality.get, set: v => quality.set(Number(v)) } },
+@@ -115,8 +114,6 @@ export function registerBuiltin(a: Actions) {
            control: { type: 'action', button: 'Apply', run: a.reduceMotion } },
  
          // ---------------------------------------------------------- system
@@ -1775,7 +1771,7 @@ index 9e1d08c..c1cc7d6 100644
          { id: 'loadGame', tab: 'system', group: 'Game', label: 'Load game', visible: inGame, control: { type: 'action', button: 'Load…', run: a.loadGame } },
          { id: 'toTitle', tab: 'system', group: 'Game', label: 'Return to title screen', help: 'Unsaved progress is lost.', visible: inGame, control: { type: 'action', button: 'Return to title', danger: true, run: a.toTitle } },
          { id: 'export', tab: 'system', group: 'Settings', label: 'Export settings', help: 'Save all settings, volumes and key bindings to a file to back them up or move them to another browser.',
-@@ -124,7 +118,7 @@ export function registerBuiltin(a: Actions) {
+@@ -124,7 +121,7 @@ export function registerBuiltin(a: Actions) {
          { id: 'import', tab: 'system', group: 'Settings', label: 'Import settings', control: { type: 'action', button: 'Import…', run: a.importSettings } },
          { id: 'resetAll', tab: 'system', group: 'Settings', label: 'Reset all settings', help: 'Restore every setting and key binding to its default. Saves are not touched.',
            control: { type: 'action', button: 'Reset all', danger: true, run: a.resetAll } },
@@ -1784,21 +1780,8 @@ index 9e1d08c..c1cc7d6 100644
            control: { type: 'action', button: 'Copy', run: a.copyDiagnostics } },
      ];
      S.forEach(register);
-@@ -32,4 +32,4 @@ export function registerBuiltin(a: Actions) {
-     // ---- ports: these are this browser build's own features
-     const quality = portValue<number>('quality', 0, v => { displayPrefs.quality = v; F.applyDisplay(); });
--    const wide = portValue<boolean>('wide', true, v => { displayPrefs.wide = v; });
-+    const wide = portValue<boolean>('wide', false, v => { displayPrefs.wide = v; });
-     const smooth = portValue<boolean>('smooth', true, v => { displayPrefs.smooth = v; F.applyDisplay(); });
-@@ -68,5 +68,5 @@ export function registerBuiltin(a: Actions) {
-         // ---------------------------------------------------------- display
-         { id: 'fullscreen', tab: 'display', group: 'Window', label: 'Fullscreen', default: false, keywords: 'window screen',
-           control: { type: 'toggle', get: () => F.isFullscreen(), set: v => { C().fullScreen = v; F.setFullscreen(v); scheduleSave(); notify(); } } },
--        { id: 'wide', tab: 'display', group: 'Window', label: 'Widescreen maps', help: 'Show more of the world at the sides on wide windows. Menus and battles always stay 4:3.', default: true, keywords: 'ultrawide aspect ratio',
-+        { id: 'wide', tab: 'display', group: 'Window', label: 'Widescreen maps', help: 'Show more of the world at the sides on wide windows. Menus and battles always stay 4:3.', default: false, keywords: 'ultrawide aspect ratio',
-           note: () => (g.SceneManager?._scene instanceof g.Scene_Map ? 'Applies on the next map you enter.' : undefined), control: { type: 'toggle', get: wide.get, set: wide.set } },
 diff --git a/src/client/settings/index.ts b/src/client/settings/index.ts
-index 42d3445..c7835f1 100644
+index 42d3445..e415910 100644
 --- a/src/client/settings/index.ts
 +++ b/src/client/settings/index.ts
 @@ -1,9 +1,7 @@
@@ -1811,7 +1794,7 @@ index 42d3445..c7835f1 100644
  import { registerBuiltin } from './builtin.ts';
  import * as F from './features.ts';
  import { closeSettings, isOpen, openSettings, settingsStatus } from './panel.ts';
-@@ -20,7 +17,6 @@ export { openSettings, closeSettings, isOpen };
+@@ -20,7 +18,6 @@ export { openSettings, closeSettings, isOpen };
  export function installSettings() {
      const CM = g.ConfigManager;
  
@@ -1819,7 +1802,7 @@ index 42d3445..c7835f1 100644
      const makeData = CM.makeData, applyData = CM.applyData;
      CM.makeData = function (this: any) { const c = makeData.call(this); c.omoriWeb = exportBag(); return c; };
      CM.applyData = function (this: any, config: any) { applyData.call(this, config); importBag(config?.omoriWeb); };
-@@ -62,7 +58,6 @@ export function installSettings() {
+@@ -62,7 +59,6 @@ export function installSettings() {
              const text = diagnostics();
              (navigator.clipboard?.writeText(text) ?? Promise.reject()).then(() => settingsStatus('Diagnostics copied'), () => { download('omori-diagnostics.txt', text, 'text/plain'); settingsStatus('Clipboard blocked: saved as a file'); });
          },
@@ -1827,7 +1810,7 @@ index 42d3445..c7835f1 100644
          loadGame() {
              closeSettings(); CM.save();
              g.SceneManager.push(g.Scene_OmoriFile); g.SceneManager._stack.pop(); g.SceneManager._nextScene.setup(false, true);
-@@ -105,7 +99,6 @@ function diagnostics(): string {
+@@ -105,7 +101,6 @@ function diagnostics(): string {
          const ext = gl?.getExtension('WEBGL_debug_renderer_info');
          if (gl && ext) gpu = String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL));
      } catch { /* blocked */ }
@@ -1835,7 +1818,7 @@ index 42d3445..c7835f1 100644
      return [
          `OpenOMORI diagnostics (${new Date().toISOString()})`,
          `page: ${location.href}`,
-@@ -113,7 +105,6 @@ function diagnostics(): string {
+@@ -113,7 +108,6 @@ function diagnostics(): string {
          `gpu: ${gpu}`,
          `canvas: ${G?._width}x${G?._height} logical, ${G?._res}x resolution, scale ${G?._realScale?.toFixed?.(2)}, window ${innerWidth}x${innerHeight} @${devicePixelRatio}x`,
          `scene: ${g.SceneManager?._scene?.constructor?.name}`,
@@ -1844,7 +1827,7 @@ index 42d3445..c7835f1 100644
      ].join('\n');
  }
 diff --git a/src/client/settings/panel.ts b/src/client/settings/panel.ts
-index f27fbad..9a0da72 100644
+index f27fbad..dc9d6a6 100644
 --- a/src/client/settings/panel.ts
 +++ b/src/client/settings/panel.ts
 @@ -141,12 +141,10 @@ function renderList() {
@@ -1862,7 +1845,7 @@ index f27fbad..9a0da72 100644
          if (gname !== group) { group = gname; if (gname) kids.push(h('h2', {}, gname)); }
          kids.push(s.control.type === 'keys' ? keysBlock() : row(s));
      }
-@@ -220,7 +216,7 @@ const keyName = (code: number) =>
+@@ -220,7 +218,7 @@ const keyName = (code: number) =>
      KEY_NAMES[code] ?? (code >= 48 && code <= 57 ? String(code - 48) : code >= 65 && code <= 90 ? String.fromCharCode(code) : code >= 96 && code <= 105 ? `Num ${code - 96}` : code >= 112 && code <= 123 ? `F${code - 111}` : `Key ${code}`);
  const PAD_NAMES = ['A', 'B', 'X', 'Y', 'LB', 'RB', 'LT', 'RT', 'Back', 'Start', 'L3', 'R3', '↑', '↓', '←', '→', 'Home'];
  const padName = (b: number) => PAD_NAMES[b] ?? `Button ${b}`;
@@ -1872,7 +1855,7 @@ index f27fbad..9a0da72 100644
  function keysBlock(): HTMLElement {
      const box = h('div', { class: 'keys' });
 diff --git a/src/client/settings/registry.ts b/src/client/settings/registry.ts
-index 7133b5a..2631ff8 100644
+index 7133b5a..8554c20 100644
 --- a/src/client/settings/registry.ts
 +++ b/src/client/settings/registry.ts
 @@ -1,4 +1,3 @@
@@ -1898,7 +1881,7 @@ index 7133b5a..2631ff8 100644
  ];
  
 diff --git a/src/client/shim/fs.ts b/src/client/shim/fs.ts
-index 7edead2..3ae199c 100644
+index 7edead2..8116854 100644
 --- a/src/client/shim/fs.ts
 +++ b/src/client/shim/fs.ts
 @@ -12,7 +12,12 @@ const MAX_ENTRY_BYTES = 8 * 1024 * 1024;
@@ -1915,7 +1898,7 @@ index 7edead2..3ae199c 100644
  const urlOf = (k: string): string => '/' + k.split('/').map(encodeURIComponent).join('/');
  const encodingOf = (o: Encoding): string | undefined => (typeof o === 'string' ? o : o?.encoding ?? undefined);
  
-@@ -35,23 +46,30 @@ class ByteCache {
+@@ -35,23 +40,30 @@ class ByteCache {
  }
  const cache = new ByteCache();
  
@@ -1959,7 +1942,7 @@ index 7edead2..3ae199c 100644
      const xhr = new XMLHttpRequest();
      xhr.open('GET', urlOf(k), false);
      xhr.overrideMimeType('text/plain; charset=x-user-defined');
-@@ -71,6 +102,7 @@ async function fetchAsync(k: string): Promise<Uint8Array | null> {
+@@ -71,6 +83,7 @@ async function fetchAsync(k: string): Promise<Uint8Array | null> {
  
  function listSync(k: string): string[] | null {
      if (lsCache.has(k)) return lsCache.get(k)!;
@@ -1967,7 +1950,7 @@ index 7edead2..3ae199c 100644
      const xhr = new XMLHttpRequest();
      xhr.open('GET', '/__ls?p=' + encodeURIComponent(k), false);
      let res: string[] | null = null;
-@@ -97,7 +130,6 @@ const overlay = new Map<string, Uint8Array | null>(); // null = deleted
+@@ -97,7 +110,6 @@ const overlay = new Map<string, Uint8Array | null>(); // null = deleted
  const overlayDirs = new Set<string>();
  let idb: IDBDatabase | null = null;
  
@@ -1975,7 +1958,7 @@ index 7edead2..3ae199c 100644
  export async function loadOverlay(dbName = 'omori-fs'): Promise<void> {
      idb = await new Promise<IDBDatabase | null>(res => {
          try {
-@@ -134,11 +166,6 @@ const bytesOf = (data: string | Uint8Array): Uint8Array =>
+@@ -134,11 +146,6 @@ const bytesOf = (data: string | Uint8Array): Uint8Array =>
  
  function lookup(k: string): Uint8Array | null | undefined {
      if (overlay.has(k)) return overlay.get(k);
@@ -1987,7 +1970,7 @@ index 7edead2..3ae199c 100644
      return cache.get(k);
  }
  
-@@ -168,10 +190,11 @@ export const fs = {
+@@ -168,10 +175,11 @@ export const fs = {
      existsSync(p: string): boolean {
          const k = keyOf(p);
          if (overlay.has(k)) return overlay.get(k) !== null;
@@ -2000,7 +1983,7 @@ index 7edead2..3ae199c 100644
          const xhr = new XMLHttpRequest();
          xhr.open('HEAD', urlOf(k), false);
          try { xhr.send(); } catch { return false; }
-@@ -183,9 +207,11 @@ export const fs = {
+@@ -183,9 +191,11 @@ export const fs = {
          if (overlayDirs.has(k) || (!overlay.has(k) && listSync(k))) {
              return { isDirectory: () => true, isFile: () => false, size: 0 };
          }
@@ -2027,7 +2010,7 @@ index 409b197..e6bf032 100644
  import { greenworks, nw, processShim, setGameKey } from './nw.ts';
  
  const g = globalThis as Record<string, any>;
-@@ -34,9 +32,7 @@ export const shimReady: Promise<void> = (async () => {
+@@ -34,9 +33,7 @@ export const shimReady: Promise<void> = (async () => {
      const res = await fetch('/__config');
      if (!res.ok) throw new Error('Could not read the game key from your OMORI install (see README: OMORI_DIR).');
      setGameKey((await res.json()).key);
@@ -2055,7 +2038,7 @@ index 47b4598..47aed02 100644
  import { ROOT, WWW, ensureGameDir, readGameKey } from './gamedir.ts';
  import { storyIndex } from './mods/mapkit-node.ts';
  
-@@ -11,19 +9,6 @@ if (!ensureGameDir()) process.exit(1);   // asks for your OMORI folder the first
+@@ -11,19 +10,6 @@ if (!ensureGameDir()) process.exit(1);   // asks for your OMORI folder the first
  
  const PORT = Number(process.argv[2] ?? process.env.PORT ?? 8080);
  
@@ -2075,7 +2058,7 @@ index 47b4598..47aed02 100644
  const TYPES: Record<string, string> = { yaml: 'text/plain', yml: 'text/plain', md: 'text/plain', ogg: 'audio/ogg', webm: 'video/webm' };
  
  /** Resolve a request path inside WWW, tolerating wrong case (the game asks for /Languages/ but the folder is languages/). */
-@@ -95,25 +67,6 @@ const server = Bun.serve({
+@@ -95,25 +81,6 @@ const server = Bun.serve({
          // Story flags of this install (used by the checkpoint panel for coverage). Scanned once, on first request.
          if (rel === '/__story.json') { try { return Response.json(storyIndex()); } catch (e) { return new Response(String(e), { status: 500 }); } }
  
@@ -2102,7 +2085,7 @@ index 47b4598..47aed02 100644
          if (!path || !statSync(path, { throwIfNoEntry: false })?.isFile()) return new Response('not found', { status: 404 });
          return fileResponse(path, req);
 diff --git a/src/sw.ts b/src/sw.ts
-index ea4054e..c72801e 100644
+index ea4054e..0f2b4f8 100644
 --- a/src/sw.ts
 +++ b/src/sw.ts
 @@ -1,85 +1,20 @@
@@ -2200,7 +2183,7 @@ index ea4054e..c72801e 100644
 -}
 diff --git a/src/web/base.ts b/src/web/base.ts
 new file mode 100644
-index 0000000..c115dab
+index 0000000..967c8f8
 --- /dev/null
 +++ b/src/web/base.ts
 @@ -0,0 +1,10 @@
@@ -2216,7 +2199,7 @@ index 0000000..c115dab
 +}
 diff --git a/src/web/diag.ts b/src/web/diag.ts
 new file mode 100644
-index 0000000..ecfe408
+index 0000000..f5fddfe
 --- /dev/null
 +++ b/src/web/diag.ts
 @@ -0,0 +1,26 @@
@@ -2248,7 +2231,7 @@ index 0000000..ecfe408
 +}
 diff --git a/src/web/file-provider.ts b/src/web/file-provider.ts
 new file mode 100644
-index 0000000..82782a9
+index 0000000..d18fa13
 --- /dev/null
 +++ b/src/web/file-provider.ts
 @@ -0,0 +1,15 @@
@@ -2269,7 +2252,7 @@ index 0000000..82782a9
 +(self as unknown as Worker).postMessage({ type: 'ready' });
 diff --git a/src/web/game-index.ts b/src/web/game-index.ts
 new file mode 100644
-index 0000000..76b6247
+index 0000000..a19c5fc
 --- /dev/null
 +++ b/src/web/game-index.ts
 @@ -0,0 +1,28 @@
@@ -2303,7 +2286,7 @@ index 0000000..76b6247
 +}
 diff --git a/src/web/game-sw.ts b/src/web/game-sw.ts
 new file mode 100644
-index 0000000..5796840
+index 0000000..3a65c34
 --- /dev/null
 +++ b/src/web/game-sw.ts
 @@ -0,0 +1,120 @@
@@ -2429,7 +2412,7 @@ index 0000000..5796840
 +}
 diff --git a/src/web/idb.ts b/src/web/idb.ts
 new file mode 100644
-index 0000000..ad32390
+index 0000000..0ec1a64
 --- /dev/null
 +++ b/src/web/idb.ts
 @@ -0,0 +1,20 @@
@@ -2455,7 +2438,7 @@ index 0000000..ad32390
 +export const setMeta = (key: string, value: unknown) => tx('meta', 'readwrite', s => s.put(value, key));
 diff --git a/src/web/import-worker.ts b/src/web/import-worker.ts
 new file mode 100644
-index 0000000..6b2925d
+index 0000000..36fb1d8
 --- /dev/null
 +++ b/src/web/import-worker.ts
 @@ -0,0 +1,53 @@
@@ -2514,7 +2497,7 @@ index 0000000..6b2925d
 +}
 diff --git a/src/web/importer.ts b/src/web/importer.ts
 new file mode 100644
-index 0000000..883d99b
+index 0000000..0567b8b
 --- /dev/null
 +++ b/src/web/importer.ts
 @@ -0,0 +1,122 @@
@@ -2642,7 +2625,7 @@ index 0000000..883d99b
 +}
 diff --git a/src/web/store.ts b/src/web/store.ts
 new file mode 100644
-index 0000000..8cc0f72
+index 0000000..fdc4d78
 --- /dev/null
 +++ b/src/web/store.ts
 @@ -0,0 +1,18 @@
@@ -2666,12 +2649,12 @@ index 0000000..8cc0f72
 +}
 diff --git a/src/web/touch.ts b/src/web/touch.ts
 new file mode 100644
-index 0000000..605711b
+index 0000000..15c7b27
 --- /dev/null
 +++ b/src/web/touch.ts
-@@ -0,0 +1,317 @@
-+type Name = 'up' | 'down' | 'left' | 'right' | 'ok' | 'escape' | 'shift' | 'pagedown';
-+type GroupId = 'pad' | 'ok' | 'escape' | 'shift' | 'pagedown';
+@@ -0,0 +1,318 @@
++type Name = 'up' | 'down' | 'left' | 'right' | 'ok' | 'escape' | 'shift' | 'pagedown' | 'tag';
++type GroupId = 'pad' | 'ok' | 'escape' | 'shift' | 'pagedown' | 'tag';
 +const g = globalThis as any;
 +const STORE_KEY = 'omori-touch-layout-v1';
 +const SCALE_MIN = 0.5, SCALE_MAX = 2, SCALE_STEP = 0.1;
@@ -2691,7 +2674,7 @@ index 0000000..605711b
 +    try {
 +        const raw = JSON.parse(localStorage.getItem(STORE_KEY) ?? '{}');
 +        const out: Layout = {};
-+        for (const id of ['pad', 'ok', 'escape', 'shift', 'pagedown'] as GroupId[]) {
++        for (const id of ['pad', 'ok', 'escape', 'shift', 'pagedown', 'tag'] as GroupId[]) {
 +            const p = raw?.[id];
 +            if (p && [p.x, p.y, p.s].every(v => typeof v === 'number' && isFinite(v))) out[id] = { x: p.x, y: p.y, s: Math.min(SCALE_MAX, Math.max(SCALE_MIN, p.s)) };
 +        }
@@ -2759,6 +2742,7 @@ index 0000000..605711b
 +    add('escape', 'B', 0.5, m => [m.W - m.R - 2.05 * m.u, m.H - m.B - 0.9 * m.u]);
 +    add('shift', 'RUN', 0.5, m => [m.W - m.R - 2.05 * m.u, m.H - m.B - 2.05 * m.u], false, 'calc(var(--u)*.26)');
 +    add('pagedown', 'W', 0.39, m => [m.W - m.R - 0.79 * m.u, m.T + 0.64 * m.u], true);
++    add('tag', 'TAG', 0.39, m => [m.W - m.R - 0.79 * m.u, m.T + 1.65 * m.u], true, 'calc(var(--u)*.2)');
 +    const gear = document.createElement('div');
 +    gear.className = 'b small';
 +    gear.textContent = 'E'; gear.setAttribute('aria-label', 'Edit touch layout');
@@ -2989,7 +2973,7 @@ index 0000000..605711b
 +}
 diff --git a/src/web/zip.test.ts b/src/web/zip.test.ts
 new file mode 100644
-index 0000000..ba5c0f9
+index 0000000..cde572f
 --- /dev/null
 +++ b/src/web/zip.test.ts
 @@ -0,0 +1,47 @@
@@ -3042,7 +3026,7 @@ index 0000000..ba5c0f9
 +});
 diff --git a/src/web/zip.ts b/src/web/zip.ts
 new file mode 100644
-index 0000000..26ae38e
+index 0000000..0b75a3d
 --- /dev/null
 +++ b/src/web/zip.ts
 @@ -0,0 +1,77 @@
