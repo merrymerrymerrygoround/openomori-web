@@ -2669,7 +2669,7 @@ new file mode 100644
 index 0000000..605711b
 --- /dev/null
 +++ b/src/web/touch.ts
-@@ -0,0 +1,314 @@
+@@ -0,0 +1,317 @@
 +type Name = 'up' | 'down' | 'left' | 'right' | 'ok' | 'escape' | 'shift' | 'pagedown';
 +type GroupId = 'pad' | 'ok' | 'escape' | 'shift' | 'pagedown';
 +const g = globalThis as any;
@@ -2901,6 +2901,7 @@ index 0000000..605711b
 +    gear.addEventListener('pointerdown', e => { e.stopPropagation(); });
 +    gear.addEventListener('pointerup', e => { e.stopPropagation(); e.preventDefault(); openEditor(); });
 +    root.addEventListener('pointerdown', (e: PointerEvent) => {
++        e.stopPropagation();
 +        if (portrait) return;
 +        const t = e.target as HTMLElement;
 +        if (t === gear) return;
@@ -2928,6 +2929,7 @@ index 0000000..605711b
 +        apply();
 +    });
 +    root.addEventListener('pointermove', (e: PointerEvent) => {
++        e.stopPropagation();
 +        if (editing) {
 +            if (!drag || drag.pointer !== e.pointerId) return;
 +            e.preventDefault();
@@ -2944,6 +2946,7 @@ index 0000000..605711b
 +        apply();
 +    });
 +    const up = (e: PointerEvent) => {
++        e.stopPropagation();
 +        if (drag && drag.pointer === e.pointerId) { drag = null; return; }
 +        if (!owner.has(e.pointerId)) return;
 +        e.preventDefault(); owner.delete(e.pointerId); down.delete(e.pointerId); apply();
