@@ -99,27 +99,26 @@ index f858c27..0802bd6 100644
  </body>
  </html>
 diff --git a/src/client/boot.ts b/src/client/boot.ts
-index fe97c0b..d802ed8 100644
+index fe97c0b..70a0c57 100644
 --- a/src/client/boot.ts
 +++ b/src/client/boot.ts
-@@ -1,14 +1,11 @@
+@@ -1,14 +1,9 @@
  // Loads the stock game scripts in order, then starts the game (what js/main.js does on window.onload).
  import { installCutsceneLayout } from './cutscene.ts';
 -import { installBeatRecorder, installCheckpointApi } from './checkpoints.ts';
-+import { installSaveImporter } from './save-import.ts';
  import { installDebug } from './debug.ts';
  import { installDisplay } from './display.ts';
 -import { installGameEvents, installErrorCapture } from './mods/api.ts';
 -import { initMods, patchPlugins, runPhase } from './mods/runtime.ts';
 -import { installModUi } from './mods/ui.ts';
- import { installSettings } from './settings/index.ts';
+-import { installSettings } from './settings/index.ts';
 +import { prefetchWebFiles } from './shim/fs.ts';
  import { listAsync, prefetch, shimReady } from './shim/index.ts';
 -import { nw } from './shim/nw.ts';
  
  const LIBS = ['pixi', 'pixi-tilemap', 'pixi-picture', 'lz-string', 'iphone-inline-video.browser'].map(n => `js/libs/${n}.js`);
  const CORE = ['rpg_core', 'rpg_managers', 'rpg_objects', 'rpg_scenes', 'rpg_sprites', 'rpg_windows', 'plugins'].map(n => `js/${n}.js`);
-@@ -36,42 +33,18 @@ async function warmCache(): Promise<void> {
+@@ -36,42 +31,16 @@ async function warmCache(): Promise<void> {
  
  export async function boot(): Promise<void> {
      const mark = (n: string) => performance.mark(`omori:${n}`);
@@ -143,10 +142,8 @@ index fe97c0b..d802ed8 100644
 -    await runPhase('post-plugins');  // mod scripts: the game's classes exist, nothing has started
      installDisplay();                // must run after plugins so it wins over YEP_CoreEngine
      installCutsceneLayout();
-+    installSaveImporter();
      installDebug();
 -    installSettings();               // replaces the game's options screens; after plugins so ConfigManager is final
-+    if (new URLSearchParams(location.search).get('newsettings') === '1') installSettings();
      SceneManager.run(Scene_Boot);
      mark("run");
 -    await runPhase('ready');
@@ -669,7 +666,7 @@ index dfcf8e3..0000000
 -    };
 -}
 diff --git a/src/client/debug.ts b/src/client/debug.ts
-index c03c613..4c9223b 100644
+index c03c613..ea1a98d 100644
 --- a/src/client/debug.ts
 +++ b/src/client/debug.ts
 @@ -2,11 +2,9 @@
@@ -686,7 +683,15 @@ index c03c613..4c9223b 100644
  const MAX_ROWS = 150; // rows rendered per list; use the filter box to narrow
  
  type Child = Node | string | null | false;
-@@ -213,88 +211,6 @@ export function installDebug(): void {
+@@ -50,7 +48,6 @@ const CSS = `
+ `;
+ 
+ export function installDebug(): void {
+-    if (new URLSearchParams(location.search).get('debug') === '0') return;
+     document.head.append(h('style', {}, CSS));
+ 
+     let tab: Tab = 'maps';
+@@ -213,98 +210,12 @@ export function installDebug(): void {
          return wrap;
      }
  
@@ -774,8 +779,19 @@ index c03c613..4c9223b 100644
 -
      function gameTab(): HTMLElement {
          const wrap = h('div');
-         const params = new URLSearchParams(location.search);
-@@ -324,7 +240,6 @@ export function installDebug(): void {
+-        const params = new URLSearchParams(location.search);
+-        const reload = (k: string, v: string | null) => { v === null ? params.delete(k) : params.set(k, v); location.search = params.toString(); };
+         const ce = h('input', { type: 'number', min: 1, placeholder: 'common event id', style: 'width:150px' });
+         wrap.append(
+             h('div', { class: 'note' }, `Renderer: ${Graphics._canvas?.width}×${Graphics._canvas?.height} backing, ${Graphics.width}×${Graphics.height} logical, UI box ${Graphics.boxWidth}×${Graphics.boxHeight}`),
+-            h('div', { class: 'bar' }, btn('Toggle FPS meter', () => { fpsOn = !fpsOn; fpsOn ? Graphics.showFps() : Graphics.hideFps(); }),
+-                btn(params.get('wide') === '0' ? 'Widescreen: off' : 'Widescreen: on', () => reload('wide', params.get('wide') === '0' ? null : '0'))),
+-            h('div', { class: 'bar' }, h('span', {}, 'Render scale'), ...[1, 2, 3, 4].map(q => btn(`${q}×`, () => reload('q', String(q))))),
++            h('div', { class: 'bar' }, btn('Toggle FPS meter', () => { fpsOn = !fpsOn; fpsOn ? Graphics.showFps() : Graphics.hideFps(); })),
+             h('div', { class: 'bar' }, ce, btn('Run common event', () => {
+                 if (!started()) return say('start a game first');
+                 const id = Number(ce.value);
+@@ -324,7 +235,6 @@ export function installDebug(): void {
          nav.replaceChildren(...TABS.map(t => h('button', { class: t === tab ? 'on' : '', onclick: () => { tab = t; filter = ''; render(); } }, t)));
          body.replaceChildren();
          if (tab === 'party') body.append(partyTab());
@@ -784,10 +800,10 @@ index c03c613..4c9223b 100644
          else {
              const warn = tab === 'maps' ? null : needGame();
 diff --git a/src/client/display.ts b/src/client/display.ts
-index f8d1a89..bc710b0 100644
+index f8d1a89..106e060 100644
 --- a/src/client/display.ts
 +++ b/src/client/display.ts
-@@ -11,8 +11,7 @@
+@@ -11,26 +11,22 @@
  const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
  
  const MAX_WIDE_WIDTH = 1120;  // ~21:9 at 480px tall; wider windows get bars rather than an absurd view
@@ -796,17 +812,31 @@ index f8d1a89..bc710b0 100644
 +const EDGE_EVERY = 4;
  
  export interface DisplayOptions {
-     /** Max internal render multiplier (1..4). `?q=` in the URL overrides it. */
-@@ -23,7 +22,7 @@ export interface DisplayOptions {
-  * Live display preferences, changed by the settings screen. The URL (`?q=`, `?wide=0`) still wins, so tests and
-  * bookmarks behave exactly as before. `quality` 0 means "automatic" (up to the default max).
+-    /** Max internal render multiplier (1..4). `?q=` in the URL overrides it. */
++    /** Max internal render multiplier (1..4). */
+     maxResolution: number;
+ }
+ 
+ /**
+- * Live display preferences, changed by the settings screen. The URL (`?q=`, `?wide=0`) still wins, so tests and
+- * bookmarks behave exactly as before. `quality` 0 means "automatic" (up to the default max).
++ * Live display preferences, changed by the settings screen. `quality` 0 means "automatic" (up to the default max).
   */
 -export const displayPrefs = { quality: 0, wide: true, smooth: true };
 +export const displayPrefs = { quality: 0, wide: false, smooth: true };
  
  export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): void {
      const G = Graphics;
-@@ -126,40 +125,22 @@ export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): voi
+-    const query = new URLSearchParams(location.search);
+-    const urlQ = Number(query.get('q')) || 0;
+-    const maxRes = () => clamp(urlQ || displayPrefs.quality || opts.maxResolution, 1, 4);
+-    const wideAllowed = () => query.get('wide') !== '0' && displayPrefs.wide;
++    const maxRes = () => clamp(displayPrefs.quality || opts.maxResolution, 1, 4);
++    const wideAllowed = () => displayPrefs.wide;
+ 
+     let baseW = 640, baseH = 480;
+ 
+@@ -126,40 +122,22 @@ export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): voi
      };
  
      // ---- bar colour ----------------------------------------------------------------------
@@ -854,7 +884,7 @@ index f8d1a89..bc710b0 100644
          const horizontal = innerWidth / innerHeight >= G._width / G._height; // bars left/right vs top/bottom
          const cw = G._width * G._realScale, ch = G._height * G._realScale;
          const gx = (innerWidth - cw) / 2, gy = (innerHeight - ch) / 2;       // the bars are what's outside the canvas
-@@ -167,13 +148,11 @@ export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): voi
+@@ -167,13 +145,11 @@ export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): voi
          if (horizontal) {
              place(first, 0, 0, Math.ceil(gx) + 1, innerHeight);
              place(second, Math.floor(gx + cw) - 1, 0, innerWidth - Math.floor(gx + cw) + 1, innerHeight);
@@ -871,10 +901,10 @@ index f8d1a89..bc710b0 100644
      }
  
 diff --git a/src/client/entry.ts b/src/client/entry.ts
-index 95ea58c..5f7a2cf 100644
+index 95ea58c..5ec25da 100644
 --- a/src/client/entry.ts
 +++ b/src/client/entry.ts
-@@ -1,7 +1,53 @@
+@@ -1,7 +1,46 @@
 -import './shim/index.ts'; // side effects first: defines require/process/nw before any game code
 -import { boot } from './boot.ts';
 +import '../web/base.ts';
@@ -897,20 +927,13 @@ index 95ea58c..5f7a2cf 100644
 +}
 +try {
 +    await ensureGame();
-+    if (new URLSearchParams(location.search).has('diag')) {
-+        document.body.style.cssText = 'background:#000;color:#fff;font:13px monospace;white-space:pre-wrap;word-break:break-all;padding:16px';
-+        document.body.textContent = await runDiagnostics();
-+    } else {
-+        if (!new URLSearchParams(location.search).has('server')) {
-+            const g = await getGame();
-+            if (g) (await import('./shim/fs.ts')).setWebIndex(buildLookup(g.files), g.files);
-+        }
-+        await import('./shim/index.ts');
-+        const { boot } = await import('./boot.ts');
-+        showFailedFilesOnGameError();
-+        boot().catch(fail);
-+        installTouchControls();
-+    }
++    const g = await getGame();
++    if (g) (await import('./shim/fs.ts')).setWebIndex(buildLookup(g.files), g.files);
++    await import('./shim/index.ts');
++    const { boot } = await import('./boot.ts');
++    showFailedFilesOnGameError();
++    boot().catch(fail);
++    installTouchControls();
 +} catch (e) { void fail(e); }
 +function showFailedFilesOnGameError(): void {
 +    const g = globalThis as any;
@@ -3371,73 +3394,6 @@ index 9dc6118..e20bb96 100644
  }
  
  declare const OmoriMod: OmoriModApi;
-diff --git a/src/client/save-import.ts b/src/client/save-import.ts
-new file mode 100644
-index 0000000..a47ba7b
---- /dev/null
-+++ b/src/client/save-import.ts
-@@ -0,0 +1,61 @@
-+import { fs } from './shim/fs.ts';
-+
-+// fileN.rpgsave are the slots; global.rpgsave (id 0) is the index the load screen builds its slot list from.
-+const SAVE_NAME = /^(?:file(\d+)|global)\.rpgsave$/i;
-+let pending: HTMLInputElement | null = null;
-+
-+/** Where the game itself looks for save `name`, so imported files land exactly where it will read them. */
-+function savePath(name: string): string {
-+    const id = Number(SAVE_NAME.exec(name)![1] ?? 0);
-+    try {
-+        const p = (globalThis as any).StorageManager?.localFilePath?.(id);
-+        if (typeof p === 'string' && p) return p;
-+    } catch { /* fall back to the default below */ }
-+    return id ? `/save/file${id}.rpgsave` : '/save/global.rpgsave';
-+}
-+
-+export function installSaveImporter(): void {
-+    const importFiles = () => {
-+        pending?.remove();
-+        const input = pending = document.createElement('input');
-+        input.type = 'file';
-+        input.multiple = true; // no `accept`: mobile pickers grey out unknown extensions like .rpgsave; names are checked below
-+        // Attached to the page so mobile browsers keep it (and its change event) alive until a file is chosen.
-+        input.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none';
-+        const done = () => { input.remove(); if (pending === input) pending = null; };
-+        input.addEventListener('cancel', done);
-+        input.onchange = async () => {
-+            try {
-+                const files = [...(input.files ?? [])];
-+                if (!files.length) return;
-+                if (files.some(f => !SAVE_NAME.test(f.name))) {
-+                    alert('Choose OMORI save files from its save folder: global.rpgsave and file1.rpgsave, file2.rpgsave, and so on.');
-+                    return;
-+                }
-+                if (!confirm(`Import ${files.length} save file(s)? Files with matching names will be replaced.`)) return;
-+                try {
-+                    const data = await Promise.all(files.map(async f => [savePath(f.name), new Uint8Array(await f.arrayBuffer())] as const));
-+                    for (const [p, bytes] of data) {
-+                        const dir = p.slice(0, p.lastIndexOf('/'));
-+                        if (dir) fs.mkdirSync(dir);
-+                        fs.writeFileSync(p, bytes);
-+                    }
-+                    const ids = files.map(f => Number(SAVE_NAME.exec(f.name)![1] ?? 0)).filter(Boolean);
-+                    const info = (globalThis as any).DataManager?.loadGlobalInfo?.();
-+                    const hidden = ids.filter(id => !info?.[id]);
-+                    alert(`Imported ${files.length} save file(s). Return to the title screen to load them.` + (hidden.length
-+                        ? `\n\nSlot(s) ${hidden.join(', ')} will look empty until you also import global.rpgsave from the same save folder.` : ''));
-+                } catch (e) { alert(`Could not import saves: ${(e as Error).message}`); }
-+            } finally { done(); }
-+        };
-+        document.body.append(input);
-+        input.click();
-+    };
-+    window.addEventListener('keydown', e => {
-+        if (e.key.toLowerCase() !== 'i' || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
-+        const target = e.target as HTMLElement | null;
-+        if (target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName ?? '')) return;
-+        e.preventDefault(); importFiles();
-+    });
-+    window.addEventListener('omori-import-save', importFiles);
-+}
 diff --git a/src/web/base.ts b/src/web/base.ts
 new file mode 100644
 index 0000000..967c8f8
@@ -3754,20 +3710,17 @@ index 0000000..36fb1d8
 +}
 diff --git a/src/web/importer.ts b/src/web/importer.ts
 new file mode 100644
-index 0000000..0567b8b
+index 0000000..d1ae64b
 --- /dev/null
 +++ b/src/web/importer.ts
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,119 @@
 +import { BASE } from './base.ts';
 +import type { GameIndex } from './game-index.ts';
-+import { gameIsIntact, removeGame, saveGame } from './store.ts';
-+const params = new URLSearchParams(location.search);
++import { gameIsIntact, saveGame } from './store.ts';
 +export async function ensureGame(): Promise<void> {
-+    if (params.has('server')) return;
 +    if (!('serviceWorker' in navigator) || !navigator.storage?.getDirectory) {
 +        throw new Error('This browser cannot run the web port: it needs service workers and the origin private file system (try a current Chrome, Edge, Firefox or Safari over https).');
 +    }
-+    if (params.has('reset')) await removeGame();
 +    await registerWorker();
 +    await startFileProvider();
 +    if (!(await gameIsIntact())) await importScreen();
@@ -3906,17 +3859,17 @@ index 0000000..fdc4d78
 +}
 diff --git a/src/web/touch.ts b/src/web/touch.ts
 new file mode 100644
-index 0000000..769af7b
+index 0000000..06563e7
 --- /dev/null
 +++ b/src/web/touch.ts
-@@ -0,0 +1,327 @@
-+type Name = 'up' | 'down' | 'left' | 'right' | 'ok' | 'escape' | 'shift' | 'pagedown' | 'tag' | 'import';
-+type GroupId = 'pad' | 'ok' | 'escape' | 'shift' | 'pagedown' | 'tag' | 'import';
+@@ -0,0 +1,336 @@
++type Name = 'up' | 'down' | 'left' | 'right' | 'ok' | 'escape' | 'shift' | 'pagedown' | 'tag';
++type GroupId = 'pad' | 'ok' | 'escape' | 'shift' | 'pagedown' | 'tag';
 +const g = globalThis as any;
 +const STORE_KEY = 'omori-touch-layout-v1';
 +const SCALE_MIN = 0.5, SCALE_MAX = 2, SCALE_STEP = 0.1;
 +interface Placed { x: number; y: number; s: number }
-+type Layout = Partial<Record<GroupId, Placed>> & { opacity?: number };
++type Layout = Partial<Record<GroupId, Placed>> & { opacity?: number; hidden?: boolean };
 +export function isTouchDevice(): boolean {
 +    const coarse = !!matchMedia?.('(pointer: coarse)').matches;
 +    const ua = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent || '');
@@ -3931,18 +3884,18 @@ index 0000000..769af7b
 +    try {
 +        const raw = JSON.parse(localStorage.getItem(STORE_KEY) ?? '{}');
 +        const out: Layout = {};
-+        for (const id of ['pad', 'ok', 'escape', 'shift', 'pagedown', 'tag', 'import'] as GroupId[]) {
++        for (const id of ['pad', 'ok', 'escape', 'shift', 'pagedown', 'tag'] as GroupId[]) {
 +            const p = raw?.[id];
 +            if (p && [p.x, p.y, p.s].every(v => typeof v === 'number' && isFinite(v))) out[id] = { x: p.x, y: p.y, s: Math.min(SCALE_MAX, Math.max(SCALE_MIN, p.s)) };
 +        }
 +        if (typeof raw?.opacity === 'number' && isFinite(raw.opacity)) out.opacity = Math.min(1, Math.max(0.2, raw.opacity));
++        if (raw?.hidden === true) out.hidden = true;
 +        return out;
 +    } catch { return {}; }
 +}
 +function saveLayout(l: Layout): void { try { localStorage.setItem(STORE_KEY, JSON.stringify(l)); } catch {  } }
 +export function installTouchControls(): void {
-+    const forced = new URLSearchParams(location.search).has('touch');
-+    if (!isTouchDevice() && !forced) return;
++    if (!isTouchDevice()) return;
 +    const css = document.createElement('style');
 +    css.textContent = `
 +#omori-touch{position:fixed;inset:0;z-index:2147483000;pointer-events:none;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
@@ -3952,6 +3905,8 @@ index 0000000..769af7b
 +  pointer-events:auto;touch-action:none;-webkit-tap-highlight-color:transparent;width:var(--u);height:var(--u)}
 +#omori-touch .b.on{background:rgba(135,140,148,.92)}
 +#omori-touch .b.small{width:calc(var(--u)*.78);height:calc(var(--u)*.78);font-size:calc(var(--u)*.28)}
++#omori-touch .b.tog{width:calc(var(--u)*.6);height:calc(var(--u)*.6);font-size:calc(var(--u)*.17)}
++#omori-touch.off .grp,#omori-touch.off .gear,#omori-touch.editing .tog{display:none}
 +#omori-touch .pad{pointer-events:auto;touch-action:none;width:calc(var(--u)*3);height:calc(var(--u)*3)}
 +#omori-touch .pad .b{position:absolute;pointer-events:none}
 +#omori-touch.editing{pointer-events:auto}
@@ -3999,13 +3954,17 @@ index 0000000..769af7b
 +    add('escape', 'B', 0.5, m => [m.W - m.R - 2.05 * m.u, m.H - m.B - 0.9 * m.u]);
 +    add('shift', 'RUN', 0.5, m => [m.W - m.R - 2.05 * m.u, m.H - m.B - 2.05 * m.u], false, 'calc(var(--u)*.26)');
 +    add('pagedown', 'W', 0.39, m => [m.W - m.R - 0.79 * m.u, m.T + 0.64 * m.u], true);
-+    add('tag', 'TAG', 0.39, m => [m.W - m.R - 0.79 * m.u, m.H - m.B - 0.9 * m.u], true, 'calc(var(--u)*.23)');
-+    add('import', 'IMPORT', 0.43, m => [m.L + 1.75 * m.u, m.T + 0.64 * m.u], true, 'calc(var(--u)*.2)');
++    add('tag', 'TAG', 0.39, m => [m.W - m.R - 0.79 * m.u, m.T + 1.6 * m.u], true, 'calc(var(--u)*.23)');
 +    const gear = document.createElement('div');
-+    gear.className = 'b small';
++    gear.className = 'b small gear';
 +    gear.textContent = 'E'; gear.setAttribute('aria-label', 'Edit touch layout');
 +    gear.style.position = 'absolute';
 +    root.append(gear);
++    const tog = document.createElement('div');
++    tog.className = 'b small tog';
++    tog.setAttribute('aria-label', 'Hide or show touch controls');
++    tog.style.position = 'absolute';
++    root.append(tog);
 +    const bar = document.createElement('div');
 +    bar.id = 'omori-edit';
 +    const hint = document.createElement('div');
@@ -4063,9 +4022,13 @@ index 0000000..769af7b
 +        }
 +        gear.style.left = m.L + 0.4 * m.u + 'px';
 +        gear.style.top = m.T + 0.25 * m.u + 'px';
++        tog.style.left = m.L + 1.3 * m.u + 'px';
++        tog.style.top = m.T + 0.34 * m.u + 'px';
++        const off = !editing && !!saved.hidden;
++        root.classList.toggle('off', off);
++        tog.textContent = off ? 'SHOW' : 'HIDE';
 +        for (const gr of groups) gr.el.classList.toggle('sel', editing && gr.id === selected);
 +    };
-+    let importPointer = -1; // the file picker needs a user activation, which touch only grants on release
 +    const owner = new Map<number, 'pad' | 'btn'>();
 +    const down = new Map<number, Set<Name>>();
 +    const lit = new Set<Name>();
@@ -4088,14 +4051,14 @@ index 0000000..769af7b
 +    };
 +    const apply = () => {
 +        const want = new Set<Name>();
-+        for (const s of down.values()) for (const n of s) if (n !== 'import') want.add(n);
++        for (const s of down.values()) for (const n of s) want.add(n);
 +        for (const n of want) if (!lit.has(n)) set(n, true);
 +        for (const n of lit) if (!want.has(n)) set(n, false);
 +        lit.clear(); for (const n of want) lit.add(n);
 +        for (const [n, el] of Object.entries(arrows)) el.classList.toggle('on', want.has(n as Name));
 +        for (const b of round) b.el.classList.toggle('on', want.has(b.name));
 +    };
-+    const releaseAll = () => { importPointer = -1; down.clear(); owner.clear(); apply(); };
++    const releaseAll = () => { down.clear(); owner.clear(); apply(); };
 +    const lockOrientation = () => { try { void (screen.orientation as any)?.lock?.('landscape')?.catch?.(() => {}); } catch {  } };
 +    let drag: { id: GroupId; pointer: number; dx: number; dy: number } | null = null;
 +    const groupAt = (t: EventTarget | null) => groups.find(gr => gr.el === t || gr.el.contains(t as Node));
@@ -4143,6 +4106,12 @@ index 0000000..769af7b
 +    mk('DONE', () => closeEditor(true), 'go');
 +    gear.addEventListener('pointerdown', e => { e.stopPropagation(); });
 +    gear.addEventListener('pointerup', e => { e.stopPropagation(); e.preventDefault(); openEditor(); });
++    tog.addEventListener('pointerdown', e => { e.stopPropagation(); });
++    tog.addEventListener('pointerup', e => {
++        e.stopPropagation(); e.preventDefault();
++        if (saved.hidden) delete saved.hidden; else { saved.hidden = true; releaseAll(); }
++        saveLayout(saved); layout();
++    });
 +    root.addEventListener('pointerdown', (e: PointerEvent) => {
 +        e.stopPropagation();
 +        if (portrait) return;
@@ -4165,7 +4134,6 @@ index 0000000..769af7b
 +        } else {
 +            const n = round.find(b => b.el === t || b.el.contains(t))?.name ?? null;
 +            if (!n) return;
-+            if (n === 'import') { importPointer = e.pointerId; return; }
 +            owner.set(e.pointerId, 'btn'); down.set(e.pointerId, new Set([n]));
 +        }
 +        try { t.setPointerCapture(e.pointerId); } catch {  }
@@ -4191,12 +4159,6 @@ index 0000000..769af7b
 +    });
 +    const up = (e: PointerEvent) => {
 +        e.stopPropagation();
-+        if (importPointer === e.pointerId) {
-+            importPointer = -1; e.preventDefault();
-+            const hit = e.type === 'pointerup' ? document.elementFromPoint(e.clientX, e.clientY) : null;
-+            if (hit && round.some(b => b.name === 'import' && (b.el === hit || b.el.contains(hit)))) window.dispatchEvent(new Event('omori-import-save'));
-+            return;
-+        }
 +        if (drag && drag.pointer === e.pointerId) { drag = null; return; }
 +        if (!owner.has(e.pointerId)) return;
 +        e.preventDefault(); owner.delete(e.pointerId); down.delete(e.pointerId); apply();
