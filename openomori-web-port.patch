@@ -114,7 +114,7 @@ index fe97c0b..c226a14 100644
      mark("run");
 -    await runPhase('ready');
 -    startHotReload();
--}
+ }
 -
 -function startHotReload() {
 -    if (new URLSearchParams(location.search).get('hot') !== '1') return;
@@ -126,7 +126,7 @@ index fe97c0b..c226a14 100644
 -            last = v;
 -        } catch {  }
 -    }, 1000);
- }
+-}
 diff --git a/src/client/checkpoints.ts b/src/client/checkpoints.ts
 index dfcf8e3..ce3087b 100644
 --- a/src/client/checkpoints.ts
@@ -151,20 +151,14 @@ diff --git a/src/client/display.ts b/src/client/display.ts
 index f8d1a89..7915c1c 100644
 --- a/src/client/display.ts
 +++ b/src/client/display.ts
-@@ -11,7 +11,6 @@
- const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+@@ -12,6 +12,5 @@
  
  const MAX_WIDE_WIDTH = 1120;
--const EDGE_EVERY = 4;
+ const EDGE_EVERY = 4;
 -const STEPS = 12;
-+const EDGE_EVERY = 4;
  
  export interface DisplayOptions {
-@@ -126,36 +125,14 @@ export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): voi
-     };
- 
-     const bars = [document.createElement('div'), document.createElement('div')] as const;
-     bars.forEach(el => Object.assign(el.style, { position: 'fixed', zIndex: '0', pointerEvents: 'none' }));
+@@ -130,32 +129,10 @@ export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): voi
      document.body.prepend(...bars);
      document.body.style.background = '#000';
  
@@ -197,7 +191,7 @@ index f8d1a89..7915c1c 100644
          const horizontal = innerWidth / innerHeight >= G._width / G._height;
          const cw = G._width * G._realScale, ch = G._height * G._realScale;
          const gx = (innerWidth - cw) / 2, gy = (innerHeight - ch) / 2;
-@@ -167,13 +142,11 @@ export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): voi
+@@ -167,13 +144,11 @@ export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): voi
          if (horizontal) {
              place(first, 0, 0, Math.ceil(gx) + 1, innerHeight);
              place(second, Math.floor(gx + cw) - 1, 0, innerWidth - Math.floor(gx + cw) + 1, innerHeight);
@@ -1665,13 +1659,6 @@ index 42d3445..c7835f1 100644
  import { registerBuiltin } from './builtin.ts';
  import * as F from './features.ts';
  import { closeSettings, isOpen, openSettings, settingsStatus } from './panel.ts';
-@@ -20,6 +19,6 @@ export { openSettings, closeSettings, isOpen };
- export function installSettings() {
-     const CM = g.ConfigManager;
- 
-     const makeData = CM.makeData, applyData = CM.applyData;
-     CM.makeData = function (this: any) { const c = makeData.call(this); c.omoriWeb = exportBag(); return c; };
-     CM.applyData = function (this: any, config: any) { applyData.call(this, config); importBag(config?.omoriWeb); };
 @@ -62,7 +61,6 @@ export function installSettings() {
              const text = diagnostics();
              (navigator.clipboard?.writeText(text) ?? Promise.reject()).then(() => settingsStatus('Diagnostics copied'), () => { download('omori-diagnostics.txt', text, 'text/plain'); settingsStatus('Clipboard blocked: saved as a file'); });
@@ -1715,20 +1702,10 @@ index f27fbad..9a0da72 100644
          if (gname !== group) { group = gname; if (gname) kids.push(h('h2', {}, gname)); }
          kids.push(s.control.type === 'keys' ? keysBlock() : row(s));
      }
-@@ -220,7 +218,7 @@ const keyName = (code: number) =>
-     KEY_NAMES[code] ?? (code >= 48 && code <= 57 ? String(code - 48) : code >= 65 && code <= 90 ? String.fromCharCode(code) : code >= 96 && code <= 105 ? `Num ${code - 96}` : code >= 112 && code <= 123 ? `F${code - 111}` : `Key ${code}`);
- const PAD_NAMES = ['A', 'B', 'X', 'Y', 'LB', 'RB', 'LT', 'RT', 'Back', 'Start', 'L3', 'R3', '↑', '↓', '←', '→', 'Home'];
- const padName = (b: number) => PAD_NAMES[b] ?? `Button ${b}`;
--const RESERVED_KEYS = new Set([116, 118, 119, 120, 121]);
-+const RESERVED_KEYS = new Set([116, 118, 119, 120, 121]);
- 
- function keysBlock(): HTMLElement {
-     const box = h('div', { class: 'keys' });
 diff --git a/src/client/settings/registry.ts b/src/client/settings/registry.ts
 index 7133b5a..2631ff8 100644
 --- a/src/client/settings/registry.ts
 +++ b/src/client/settings/registry.ts
-@@ -1,0 +1,0 @@
 @@ -6,5 +6,5 @@
  
 -export type TabId = 'general' | 'display' | 'audio' | 'controls' | 'accessibility' | 'mods' | 'system';
@@ -1762,7 +1739,7 @@ index 7edead2..3ae199c 100644
  const urlOf = (k: string): string => '/' + k.split('/').map(encodeURIComponent).join('/');
  const encodingOf = (o: Encoding): string | undefined => (typeof o === 'string' ? o : o?.encoding ?? undefined);
  
-@@ -35,22 +41,32 @@ class ByteCache {
+@@ -35,22 +40,32 @@ class ByteCache {
  }
  const cache = new ByteCache();
  
@@ -1807,7 +1784,7 @@ index 7edead2..3ae199c 100644
      const xhr = new XMLHttpRequest();
      xhr.open('GET', urlOf(k), false);
      xhr.overrideMimeType('text/plain; charset=x-user-defined');
-@@ -71,6 +90,7 @@ async function fetchAsync(k: string): Promise<Uint8Array | null> {
+@@ -71,6 +86,7 @@ async function fetchAsync(k: string): Promise<Uint8Array | null> {
  
  function listSync(k: string): string[] | null {
      if (lsCache.has(k)) return lsCache.get(k)!;
@@ -1815,14 +1792,7 @@ index 7edead2..3ae199c 100644
      const xhr = new XMLHttpRequest();
      xhr.open('GET', '/__ls?p=' + encodeURIComponent(k), false);
      let res: string[] | null = null;
-@@ -97,6 +117,6 @@ const overlay = new Map<string, Uint8Array | null>(); // null = deleted
- const overlayDirs = new Set<string>();
- let idb: IDBDatabase | null = null;
- 
- export async function loadOverlay(dbName = 'omori-fs'): Promise<void> {
-     idb = await new Promise<IDBDatabase | null>(res => {
-         try {
-@@ -134,11 +154,6 @@ const bytesOf = (data: string | Uint8Array): Uint8Array =>
+@@ -134,11 +150,6 @@ const bytesOf = (data: string | Uint8Array): Uint8Array =>
  
  function lookup(k: string): Uint8Array | null | undefined {
      if (overlay.has(k)) return overlay.get(k);
@@ -1834,7 +1804,7 @@ index 7edead2..3ae199c 100644
      return cache.get(k);
  }
  
-@@ -168,10 +183,11 @@ export const fs = {
+@@ -168,10 +179,11 @@ export const fs = {
      existsSync(p: string): boolean {
          const k = keyOf(p);
          if (overlay.has(k)) return overlay.get(k) !== null;
@@ -1847,7 +1817,7 @@ index 7edead2..3ae199c 100644
          const xhr = new XMLHttpRequest();
          xhr.open('HEAD', urlOf(k), false);
          try { xhr.send(); } catch { return false; }
-@@ -183,9 +199,11 @@ export const fs = {
+@@ -183,9 +195,11 @@ export const fs = {
          if (overlayDirs.has(k) || (!overlay.has(k) && listSync(k))) {
              return { isDirectory: () => true, isFile: () => false, size: 0 };
          }
@@ -1914,9 +1884,9 @@ index 47b4598..47aed02 100644
 -
  const TYPES: Record<string, string> = { yaml: 'text/plain', yml: 'text/plain', md: 'text/plain', ogg: 'audio/ogg', webm: 'video/webm' };
  
-@@ -95,23 +81,5 @@ const server = Bun.serve({
+@@ -95,22 +84,4 @@ const server = Bun.serve({
          if (rel === '/__story.json') { try { return Response.json(storyIndex()); } catch (e) { return new Response(String(e), { status: 500 }); } }
- 
+-
 -        if (rel === '/__mods/version') return Response.json({ version: modsVersion });
 -        if (rel === '/__mods/list') {
 -            const mods = discoverMods(MODS_DIR, (n, e) => log(`[error] cannot read mod "${n}": ${e.message}`));
@@ -1934,10 +1904,9 @@ index 47b4598..47aed02 100644
 -                return new Response(null, { status: 204 });
 -            }, () => new Response('bad json', { status: 400 }));
 -        }
--
+ 
          const path = resolveInWww(rel);
          if (!path || !statSync(path, { throwIfNoEntry: false })?.isFile()) return new Response('not found', { status: 404 });
-         return fileResponse(path, req);
 diff --git a/src/sw.ts b/src/sw.ts
 index ea4054e..c72801e 100644
 --- a/src/sw.ts
@@ -1949,7 +1918,7 @@ index ea4054e..c72801e 100644
 +import { dropGame, gameFetch, isAppAsset, relPath, specialRoute } from './web/game-sw.ts';
  
  const sw = self as any;
- 
+-
 -let engine: Promise<ModEngine> | null = null;
 -
 -function build(safe = false): Promise<ModEngine> {
@@ -1966,7 +1935,7 @@ index ea4054e..c72801e 100644
 -    })();
 -}
 -const get = () => (engine ??= build());
--
+ 
  sw.addEventListener('install', () => void sw.skipWaiting());
  sw.addEventListener('activate', (e: any) => e.waitUntil(sw.clients.claim()));
  sw.addEventListener('message', (e: any) => {
@@ -1975,12 +1944,12 @@ index ea4054e..c72801e 100644
 -    e.waitUntil(engine.then(() => e.source?.postMessage({ type: 'reloaded' }), () => e.source?.postMessage({ type: 'reloaded', error: true })));
 +    if (e.data?.type === 'game-reload') dropGame();
  });
- 
+-
 -const MIME: Record<string, string> = {
 -    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', ogg: 'audio/ogg', m4a: 'audio/mp4', mp3: 'audio/mpeg', wav: 'audio/wav',
 -    webm: 'video/webm', mp4: 'video/mp4', ttf: 'font/ttf', otf: 'font/otf', woff: 'font/woff', woff2: 'font/woff2', js: 'text/javascript', json: 'application/json', css: 'text/css', html: 'text/html', txt: 'text/plain', yml: 'text/plain',
 -};
--
+ 
  sw.addEventListener('fetch', (event: any) => {
      const req = event.request;
 -    if (req.method !== 'GET') return;
@@ -2604,7 +2573,7 @@ index 0000000..605711b
 +#omori-touch .b.small{width:calc(var(--u)*.78);height:calc(var(--u)*.78);font-size:calc(var(--u)*.28)}
 +#omori-touch .pad{pointer-events:auto;touch-action:none;width:calc(var(--u)*3);height:calc(var(--u)*3)}
 +#omori-touch .pad .b{position:absolute;pointer-events:none}
-+#omori-touch.editing{pointer-events:auto}
++#omori-touch.editing{pointer-events:auto} /* a full-screen catcher while editing: taps on empty space deselect instead of reaching the game */
 +#omori-touch.editing .sel{outline:3px dashed #ffd54a;outline-offset:4px}
 +#omori-touch.editing .pad{background:#ffffff14;border-radius:12px}
 +#omori-edit{position:absolute;left:50%;transform:translateX(-50%);top:calc(env(safe-area-inset-top) + 8px);display:none;flex-direction:column;align-items:center;gap:8px;
@@ -3231,7 +3200,7 @@ index f8621c4..7d50be4 100644
 @@ -136,23 +136,9 @@ try {
      check(await page.evaluate(() => (globalThis as any).Input.keyMapper[75]) === 'shift', 'a key already used elsewhere moves to the new action (K: Confirm → Run)');
      await page.screenshot({ path: 'test/out/settings-controls.png' });
- 
+-
 -    await page.evaluate(() => {
 -        const api = (globalThis as any).OmoriMod.scope('test-mod');
 -        (globalThis as any).__modGot = [];
@@ -3245,7 +3214,7 @@ index f8621c4..7d50be4 100644
 -        input.value = '8'; input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true }));
 -    });
 -    check(await page.evaluate(() => (globalThis as any).__modGot.at(-1)) === 8, 'the mod\'s onChange callback received the new value');
--
+ 
      await page.keyboard.press('Escape');
      await sleep(1200);
      const saved = await page.evaluate(() => JSON.parse((globalThis as any).StorageManager.load(-1)));
