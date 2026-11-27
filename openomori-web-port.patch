@@ -1,0 +1,3255 @@
+diff --git a/build.ts b/build.ts
+index df9e662..c368dca 100644
+--- a/build.ts
++++ b/build.ts
+@@ -1,4 +1,3 @@
+ export {};
+-import { copyFileSync, mkdirSync } from 'node:fs';
+ const result = await Bun.build({
+     entrypoints: ['src/client/entry.ts'],
+@@ -31,6 +30,18 @@ if (!sw.success) {
+ }
+ console.log(`built dist/sw.js (${(sw.outputs[0]!.size / 1024).toFixed(0)} KB)`);
+ 
+-mkdirSync('dist/vendor/libarchive', { recursive: true });
+-for (const f of ['worker-bundle.js', 'libarchive.wasm']) copyFileSync(`node_modules/libarchive.js/dist/${f}`, `dist/vendor/libarchive/${f}`);
+-console.log('copied libarchive worker + wasm to dist/vendor/libarchive');
++for (const name of ['import-worker', 'file-provider']) {
++    const w = await Bun.build({
++        entrypoints: [`src/web/${name}.ts`],
++        outdir: 'dist',
++        naming: `${name}.js`,
++        target: 'browser',
++        format: 'iife',
++        minify: !process.argv.includes('--dev'),
++    });
++    if (!w.success) {
++        for (const log of w.logs) console.error(log);
++        process.exit(1);
++    }
++    console.log(`built dist/${name}.js (${(w.outputs[0]!.size / 1024).toFixed(0)} KB)`);
++}
+diff --git a/package.json b/package.json
+index ef922b9..2840d2d 100644
+--- a/package.json
++++ b/package.json
+@@ -35,7 +35,7 @@
+     "start": "bun run build.ts && bun run src/server.ts",
+     "dev": "bun run build.ts --dev && bun --watch run src/server.ts",
+     "typecheck": "tsc --noEmit",
+-    "test": "bun run build.ts && bun run mod map build story-demo && bun run mod map build edit-demo && bun test src && bun run test/smoke.ts && bun run test/debug-panel.ts && bun run test/checkpoints.ts && bun run test/story-demo.ts && bun run test/newgame-plus.ts && bun run test/cutscene.ts && bun run test/mods.ts && bun run test/settings.ts",
++    "test": "bun run build.ts && bun run mod map build story-demo && bun run mod map build edit-demo && bun test src && bun run test/smoke.ts && bun run test/debug-panel.ts && bun run test/checkpoints.ts && bun run test/story-demo.ts && bun run test/newgame-plus.ts && bun run test/cutscene.ts && bun run test/settings.ts",
+     "mod": "bun run src/cli.ts"
+   },
+   "dependencies": {
+diff --git a/public/index.html b/public/index.html
+index f858c27..0802bd6 100644
+--- a/public/index.html
++++ b/public/index.html
+@@ -2,7 +2,9 @@
+ <html lang="en">
+ <head>
+     <meta charset="UTF-8">
+-    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
++    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover">
++    <meta name="mobile-web-app-capable" content="yes">
++    <meta name="apple-mobile-web-app-capable" content="yes">
+     <meta name="color-scheme" content="dark">
+     <link rel="icon" href="icon/icon.png" type="image/png">
+     <link rel="preload" href="fonts/gamefont.css" as="style">
+@@ -14,6 +16,6 @@
+     </style>
+ </head>
+ <body>
+-    <script type="module" src="/app.js"></script>
++    <script type="module" src="app.js"></script>
+ </body>
+ </html>
+diff --git a/src/client/boot.ts b/src/client/boot.ts
+index fe97c0b..c226a14 100644
+--- a/src/client/boot.ts
++++ b/src/client/boot.ts
+@@ -3,12 +3,9 @@ import { installCutsceneLayout } from './cutscene.ts';
+ import { installBeatRecorder, installCheckpointApi } from './checkpoints.ts';
+ import { installDebug } from './debug.ts';
+ import { installDisplay } from './display.ts';
+-import { installGameEvents, installErrorCapture } from './mods/api.ts';
+-import { initMods, patchPlugins, runPhase } from './mods/runtime.ts';
+-import { installModUi } from './mods/ui.ts';
+ import { installSettings } from './settings/index.ts';
++import { prefetchWebFiles } from './shim/fs.ts';
+ import { listAsync, prefetch, shimReady } from './shim/index.ts';
+-import { nw } from './shim/nw.ts';
+ 
+ const LIBS = ['pixi', 'pixi-tilemap', 'pixi-picture', 'lz-string', 'iphone-inline-video.browser'].map(n => `js/libs/${n}.js`);
+ const CORE = ['rpg_core', 'rpg_managers', 'rpg_objects', 'rpg_scenes', 'rpg_sprites', 'rpg_windows', 'plugins'].map(n => `js/${n}.js`);
+@@ -36,41 +33,19 @@ async function warmCache(): Promise<void> {
+ 
+ export async function boot(): Promise<void> {
+     const mark = (n: string) => performance.mark(`omori:${n}`);
+-    installErrorCapture();
+     await shimReady; mark("shim-ready");
+-    installModUi();
+-    await initMods(String(nw.App.argv[0] ?? '').replace(/^--/, '')); mark("mods");
+-    await runPhase('early');
+-    const warm = warmCache();
++    const warm = Promise.all([warmCache(), prefetchWebFiles()]).then(() => {});
+     for (const src of [...LIBS, ...CORE]) await loadScript(src);
+     mark("core-scripts");
+     await warm; mark("cache-warm");
+-    await runPhase('pre-plugins');
+-    patchPlugins();
+     PluginManager.setup($plugins);
+     mark("plugins");
+-    installGameEvents();
+     installCheckpointApi();
+     installBeatRecorder();
+-    await runPhase('post-plugins');
+     installDisplay();
+     installCutsceneLayout();
+     installDebug();
+-    installSettings();
++    if (new URLSearchParams(location.search).get('newsettings') === '1') installSettings();
+     SceneManager.run(Scene_Boot);
+     mark("run");
+-    await runPhase('ready');
+-    startHotReload();
+-}
+-
+-function startHotReload() {
+-    if (new URLSearchParams(location.search).get('hot') !== '1') return;
+-    let last: number | null = null;
+-    setInterval(async () => {
+-        try {
+-            const v = (await (await fetch('/__mods/version', { cache: 'no-store' })).json()).version as number;
+-            if (last !== null && v !== last) location.reload();
+-            last = v;
+-        } catch {  }
+-    }, 1000);
+ }
+diff --git a/src/client/checkpoints.ts b/src/client/checkpoints.ts
+index dfcf8e3..ce3087b 100644
+--- a/src/client/checkpoints.ts
++++ b/src/client/checkpoints.ts
+@@ -4,5 +4,4 @@
+ import { diffDigests, makeDigest, type Change, type Digest } from './checkpoint-core.ts';
+-import { getActiveProfile } from './mods/store.ts';
+ import { portValue, register } from './settings/registry.ts';
+ import type { StoryIndex } from '../mods/storyscan.ts';
+ import { ENDING_FLAGS, PHASE_FLAGS, SPINE_SWITCH, coverage, describe, routeKey, routeLabel, signature } from './story-model.ts';
+@@ -30,8 +29,7 @@ let dbPromise: Promise<IDBDatabase> | null = null;
+ async function db(): Promise<IDBDatabase> {
+     if (!dbPromise) {
+         dbPromise = (async () => {
+-            const p = await getActiveProfile().catch(() => null);
+-            const name = 'omori-checkpoints' + (p && p.id !== 'default' ? ':' + p.id : '');
++            const name = 'omori-checkpoints';
+             return new Promise<IDBDatabase>((res, rej) => {
+                 const r = indexedDB.open(name, 1);
+                 r.onupgradeneeded = () => r.result.createObjectStore(STORE, { keyPath: 'id' });
+diff --git a/src/client/display.ts b/src/client/display.ts
+index f8d1a89..7915c1c 100644
+--- a/src/client/display.ts
++++ b/src/client/display.ts
+@@ -11,7 +11,6 @@
+ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+ 
+ const MAX_WIDE_WIDTH = 1120;
+-const EDGE_EVERY = 4;
+-const STEPS = 12;
++const EDGE_EVERY = 4;
+ 
+ export interface DisplayOptions {
+@@ -126,36 +125,14 @@ export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): voi
+     };
+ 
+     const bars = [document.createElement('div'), document.createElement('div')] as const;
+     bars.forEach(el => Object.assign(el.style, { position: 'fixed', zIndex: '0', pointerEvents: 'none' }));
+     document.body.prepend(...bars);
+     document.body.style.background = '#000';
+ 
+-    const mkProbe = (w: number, h: number) => {
+-        const c = document.createElement('canvas');
+-        c.width = w; c.height = h;
+-        const x = c.getContext('2d', { willReadFrequently: true })!;
+-        x.imageSmoothingEnabled = true; x.imageSmoothingQuality = 'high';
+-        return x;
+-    };
+-    const probeV = mkProbe(1, STEPS), probeH = mkProbe(STEPS, 1);
+-
+-    function edgeColors(src: HTMLCanvasElement, side: 'left' | 'right' | 'top' | 'bottom'): string[] {
+-        const sw = src.width, sh = src.height, k = 2 * G._res;
+-        const vertical = side === 'left' || side === 'right';
+-        const ctx = vertical ? probeV : probeH;
+-        if (side === 'left') ctx.drawImage(src, 0, 0, k, sh, 0, 0, 1, STEPS);
+-        else if (side === 'right') ctx.drawImage(src, sw - k, 0, k, sh, 0, 0, 1, STEPS);
+-        else if (side === 'top') ctx.drawImage(src, 0, 0, sw, k, 0, 0, STEPS, 1);
+-        else ctx.drawImage(src, 0, sh - k, sw, k, 0, 0, STEPS, 1);
+-        const d = ctx.getImageData(0, 0, vertical ? 1 : STEPS, vertical ? STEPS : 1).data;
+-        return Array.from({ length: STEPS }, (_, i) => `rgb(${d[i * 4]},${d[i * 4 + 1]},${d[i * 4 + 2]})`);
+-    }
+-
+     const place = (el: HTMLElement, x: number, y: number, w: number, h: number) =>
+         Object.assign(el.style, { left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px` });
+ 
+     function paintBars() {
+-        const src: HTMLCanvasElement = G._canvas;
+         const horizontal = innerWidth / innerHeight >= G._width / G._height;
+         const cw = G._width * G._realScale, ch = G._height * G._realScale;
+         const gx = (innerWidth - cw) / 2, gy = (innerHeight - ch) / 2;
+@@ -167,13 +142,11 @@ export function installDisplay(opts: DisplayOptions = { maxResolution: 3 }): voi
+         if (horizontal) {
+             place(first, 0, 0, Math.ceil(gx) + 1, innerHeight);
+             place(second, Math.floor(gx + cw) - 1, 0, innerWidth - Math.floor(gx + cw) + 1, innerHeight);
+-            first.style.background = `linear-gradient(180deg, ${edgeColors(src, 'left')})`;
+-            second.style.background = `linear-gradient(180deg, ${edgeColors(src, 'right')})`;
++            first.style.background = second.style.background = '#000';
+         } else {
+             place(first, 0, 0, innerWidth, Math.ceil(gy) + 1);
+             place(second, 0, Math.floor(gy + ch) - 1, innerWidth, innerHeight - Math.floor(gy + ch) + 1);
+-            first.style.background = `linear-gradient(90deg, ${edgeColors(src, 'top')})`;
+-            second.style.background = `linear-gradient(90deg, ${edgeColors(src, 'bottom')})`;
++            first.style.background = second.style.background = '#000';
+         }
+     }
+ 
+diff --git a/src/client/entry.ts b/src/client/entry.ts
+index 95ea58c..9ac58a9 100644
+--- a/src/client/entry.ts
++++ b/src/client/entry.ts
+@@ -1,7 +1,55 @@
+-import './shim/index.ts';
+-import { boot } from './boot.ts';
++import '../web/base.ts';
++import { runDiagnostics } from '../web/diag.ts';
++import { ensureGame } from '../web/importer.ts';
++import { installTouchControls } from '../web/touch.ts';
++import { buildLookup } from '../web/game-index.ts';
++import { getGame } from '../web/store.ts';
+ 
+-boot().catch(e => {
+-    document.body.style.cssText = 'background:#000;color:#fff;font:14px monospace;white-space:pre-wrap;padding:16px';
+-    document.body.textContent = e instanceof Error ? e.stack ?? e.message : String(e);
+-});
++async function fail(e: unknown) {
++    const text = e instanceof Error ? `${e.name}: ${e.message}\n${e.stack ?? ''}` : String(e);
++    document.body.style.cssText = 'background:#000;color:#fff;font:13px monospace;white-space:pre-wrap;word-break:break-all;padding:16px;overflow:auto;height:100%;box-sizing:border-box';
++    document.body.textContent = text + '\n\nChecking the web port...';
++    const report = await runDiagnostics().catch(x => 'diagnostics failed: ' + String(x));
++    document.body.textContent = text + '\n\n--- report ---\n' + report;
++}
++
++try {
++    await ensureGame();
++    if (new URLSearchParams(location.search).has('diag')) {
++        document.body.style.cssText = 'background:#000;color:#fff;font:13px monospace;white-space:pre-wrap;word-break:break-all;padding:16px';
++        document.body.textContent = await runDiagnostics();
++    } else {
++        if (!new URLSearchParams(location.search).has('server')) {
++            const g = await getGame();
++            if (g) (await import('./shim/fs.ts')).setWebIndex(buildLookup(g.files), g.files);
++        }
++        await import('./shim/index.ts');
++        const { boot } = await import('./boot.ts');
++        showFailedFilesOnGameError();
++        boot().catch(fail);
++        installTouchControls();
++    }
++} catch (e) { void fail(e); }
++
++function showFailedFilesOnGameError(): void {
++    const g = globalThis as any;
++    const wrap = () => {
++        const real = g.Graphics?.printError;
++        if (!real || real.__omoriWrapped) return !!real;
++        g.Graphics.printError = function (this: unknown, ...a: unknown[]) {
++            const r = real.apply(this, a);
++            void fetch('/__failures', { cache: 'no-store' }).then(x => x.json()).then((list: string[]) => {
++                const box = g.Graphics._errorPrinter as HTMLElement | undefined;
++                if (!box || !list.length) return;
++                const pre = document.createElement('pre');
++                pre.style.cssText = 'color:#ccc;font:12px monospace;white-space:pre-wrap;word-break:break-all;text-align:left;margin:12px 16px';
++                pre.textContent = 'Files the web port could not serve:\n' + list.join('\n');
++                box.appendChild(pre);
++            }).catch(() => {});
++            return r;
++        };
++        g.Graphics.printError.__omoriWrapped = true;
++        return true;
++    };
++    const t = setInterval(() => { if (wrap()) clearInterval(t); }, 50);
++}
+diff --git a/src/client/mods/api.ts b/src/client/mods/api.ts
+deleted file mode 100644
+index f8150f6..0000000
+--- a/src/client/mods/api.ts
++++ /dev/null
+@@ -1,197 +0,0 @@
+-import { isLoaded, portValue, register, type Choice } from '../settings/registry.ts';
+-
+-
+-export interface ErrorEntry { mod: string; message: string; stack?: string; time: number; count: number; level: 'error' | 'warn' }
+-type Listener = (...args: any[]) => void;
+-
+-const MOD_URL = /omori-mod:\/\/([^/\s)]+)\/([^\s:)]*)/;
+-const MAX_HOOK_ERRORS = 10;
+-
+-export const errors: ErrorEntry[] = [];
+-const errorSubs = new Set<() => void>();
+-export const onErrors = (fn: () => void) => { errorSubs.add(fn); return () => errorSubs.delete(fn); };
+-
+-let current: { id: string; file: string } | null = null;
+-export const setCurrent = (c: typeof current) => { current = c; };
+-
+-const events = new Map<string, Set<{ fn: Listener; mod: string }>>();
+-const commands = new Map<string, { fn: (args: string[], interp: any) => void; mod: string }>();
+-let commandsInstalled = false;
+-const hookErrors = new WeakMap<object, number>();
+-
+-export const blame = (text?: string): string | null => MOD_URL.exec(text ?? '')?.[1] ?? null;
+-
+-function send(level: string, mod: string, message: string) {
+-    try { void fetch('/__mods/log', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ level, mod, message }), keepalive: true }); } catch {  }
+-}
+-
+-export function report(mod: string, err: unknown, context = '', level: 'error' | 'warn' = 'error') {
+-    const e = err instanceof Error ? err : new Error(String(err));
+-    const message = (context ? `${context}: ` : '') + e.message;
+-    const last = errors[errors.length - 1];
+-    if (last && last.mod === mod && last.message === message && Date.now() - last.time < 2000) { last.count++; last.time = Date.now(); }
+-    else {
+-        errors.push({ mod, message, stack: e.stack, time: Date.now(), count: 1, level });
+-        if (errors.length > 200) errors.shift();
+-        send(level, mod, e.stack ? `${message}\n${e.stack}` : message);
+-    }
+-    (level === 'error' ? origConsole.error : origConsole.warn)(`[mod:${mod}]`, message, e.stack ?? '');
+-    errorSubs.forEach(f => f());
+-}
+-
+-const origConsole = { error: console.error.bind(console), warn: console.warn.bind(console) };
+-
+-function emit(event: string, ...args: unknown[]) {
+-    for (const l of [...(events.get(event) ?? [])]) {
+-        try { l.fn(...args); } catch (e) { report(l.mod, e, `handler for "${event}"`); }
+-    }
+-}
+-
+-function installCommands() {
+-    if (commandsInstalled) return;
+-    const GI = (globalThis as any).Game_Interpreter;
+-    if (!GI) return;
+-    commandsInstalled = true;
+-    const orig = GI.prototype.pluginCommand;
+-    GI.prototype.pluginCommand = function (this: any, command: string, args: string[]) {
+-        const c = commands.get(String(command).toLowerCase());
+-        if (c) {
+-            try { c.fn(args, this); } catch (e) { report(c.mod, e, `plugin command "${command}"`); }
+-            return;
+-        }
+-        return orig?.call(this, command, args);
+-    };
+-}
+-
+-function hook(target: any, method: string, fn: (orig: (...a: any[]) => any, ...args: any[]) => any, mod: string) {
+-    const orig = target?.[method];
+-    if (typeof orig !== 'function') {
+-        report(mod, new Error(`cannot hook ${target?.name ?? target?.constructor?.name ?? 'target'}.${method}: it is not a function (typo, or the game changed?)`));
+-        return () => {};
+-    }
+-    const key = {};
+-    const wrapper = function (this: any, ...args: any[]) {
+-        if ((hookErrors.get(key) ?? 0) >= MAX_HOOK_ERRORS) return orig.apply(this, args);
+-        let called = false, result: unknown;
+-        const callOrig = (...a: any[]) => { called = true; result = orig.apply(this, a.length ? a : args); return result; };
+-        try { return fn.call(this, callOrig, ...args); }
+-        catch (e) {
+-            const n = (hookErrors.get(key) ?? 0) + 1;
+-            hookErrors.set(key, n);
+-            report(mod, e, `hook ${method}${n >= MAX_HOOK_ERRORS ? ` (disabled after ${n} errors)` : ''}`);
+-            return called ? result : orig.apply(this, args);
+-        }
+-    };
+-    target[method] = wrapper;
+-    return () => { if (target[method] === wrapper) target[method] = orig; };
+-}
+-
+-type SettingDef =
+-    | { id: string; label: string; help?: string; type: 'toggle'; default: boolean; onChange?(v: boolean): void }
+-    | { id: string; label: string; help?: string; type: 'slider'; default: number; min: number; max: number; step?: number; unit?: string; onChange?(v: number): void }
+-    | { id: string; label: string; help?: string; type: 'choice'; default: string | number; options: Choice[]; onChange?(v: string | number): void }
+-    | { id: string; label: string; help?: string; type: 'action'; button: string; run(): void };
+-
+-export interface ScopedApi {
+-    settings: { add<T extends boolean | number | string>(def: SettingDef): { get(): T; set(v: T): void } };
+-    id: string;
+-    log(...a: unknown[]): void;
+-    warn(...a: unknown[]): void;
+-    error(err: unknown, context?: string): void;
+-    on(event: string, fn: Listener): () => void;
+-    hook(target: any, method: string, fn: (orig: (...a: any[]) => any, ...args: any[]) => any): () => void;
+-    command(name: string, fn: (args: string[], interp: any) => void): void;
+-    safe<T>(fn: () => T, context?: string): T | undefined;
+-}
+-
+-function scoped(mod: string): ScopedApi {
+-    return {
+-        id: mod,
+-        log: (...a) => console.log(`[mod:${mod}]`, ...a),
+-        warn: (...a) => report(mod, new Error(a.map(String).join(' ')), '', 'warn'),
+-        error: (err, ctx) => report(mod, err, ctx),
+-        on(event, fn) {
+-            const l = { fn, mod };
+-            (events.get(event) ?? events.set(event, new Set()).get(event)!).add(l);
+-            return () => events.get(event)?.delete(l);
+-        },
+-        hook: (t, m, fn) => hook(t, m, fn, mod),
+-        command(name, fn) { installCommands(); commands.set(name.toLowerCase(), { fn, mod }); },
+-        safe(fn, ctx) { try { return fn(); } catch (e) { report(mod, e, ctx); return undefined; } },
+-        settings: {
+-            add(def: SettingDef) {
+-                if (def.type === 'action') {
+-                    const run = () => { try { def.run(); } catch (e) { report(mod, e, `action "${def.id}"`); } };
+-                    register({ id: `${mod}.${def.id}`, tab: 'mods' as const, group: mod, label: def.label, help: def.help, control: { type: 'action', button: def.button, run }, owner: mod });
+-                    return { get: () => undefined, set: () => {} } as any;
+-                }
+-                const guard = (fn?: (v: any) => void) => (v: any) => { try { fn?.(v); } catch (e) { report(mod, e, `onChange for setting "${def.id}"`); } };
+-                const v = portValue<any>(`mod.${mod}.${def.id}`, def.default, guard(def.onChange));
+-                const base = { id: `${mod}.${def.id}`, tab: 'mods' as const, group: mod, label: def.label, help: def.help, default: def.default as boolean | number | string, owner: mod };
+-                if (def.type === 'toggle') register({ ...base, control: { type: 'toggle', get: v.get, set: v.set } });
+-                else if (def.type === 'slider') register({ ...base, control: { type: 'slider', min: def.min, max: def.max, step: def.step ?? 1, unit: def.unit, get: v.get, set: v.set } });
+-                else register({ ...base, control: { type: 'choice', options: def.options, get: v.get, set: v.set } });
+-                if (isLoaded()) guard(def.onChange)(v.get());
+-                return v as any;
+-            },
+-        },
+-    };
+-}
+-
+-export interface ModInfo { id: string; name: string; version: string; enabled: boolean }
+-export const modInfo: ModInfo[] = [];
+-
+-export const OmoriMod = {
+-    apiVersion: 1,
+-    mods: modInfo,
+-    scope(id?: string): ScopedApi {
+-        const mod = id ?? current?.id ?? blame(new Error().stack) ?? '(unknown)';
+-        return scoped(mod);
+-    },
+-    emit,
+-    has: (id: string) => modInfo.some(m => m.id === id && m.enabled),
+-};
+-
+-export function installGameEvents() {
+-    const g = globalThis as any;
+-    const wrap = (target: any, method: string, event: string, pick: (...a: any[]) => unknown[]) => {
+-        if (typeof target?.[method] !== 'function') return;
+-        const orig = target[method];
+-        target[method] = function (this: any, ...a: any[]) {
+-            const r = orig.apply(this, a);
+-            emit(event, ...pick.apply(this, a as any));
+-            return r;
+-        };
+-    };
+-    wrap(g.SceneManager, 'goto', 'scene:goto', (cls: any) => [cls?.name]);
+-    wrap(g.Game_Map?.prototype, 'setup', 'map:setup', (id: number) => [id]);
+-    wrap(g.DataManager, 'setupNewGame', 'game:new', () => []);
+-    wrap(g.DataManager, 'extractSaveContents', 'game:load', () => []);
+-    wrap(g.DataManager, 'makeSaveContents', 'game:save', () => []);
+-}
+-
+-export function installErrorCapture() {
+-    window.addEventListener('error', ev => {
+-        const mod = blame(ev.filename) ?? blame(ev.error?.stack) ?? current?.id ?? '(game)';
+-        report(mod, ev.error ?? new Error(ev.message), ev.filename && !blame(ev.filename) ? `at ${ev.filename}:${ev.lineno}` : '');
+-    });
+-    window.addEventListener('unhandledrejection', ev => {
+-        const stack = (ev.reason as Error | undefined)?.stack;
+-        report(blame(stack) ?? '(game)', ev.reason, 'unhandled promise rejection');
+-    });
+-    let busy = false;
+-    for (const lvl of ['error', 'warn'] as const) {
+-        const o = origConsole[lvl];
+-        console[lvl] = (...args: unknown[]) => {
+-            o(...args);
+-            if (busy) return;
+-            busy = true;
+-            try {
+-                const text = args.map(a => (a instanceof Error ? a.stack ?? a.message : typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+-                if (!text.startsWith('[mod:')) send(lvl, blame(text) ?? '(game)', text.slice(0, 2000));
+-            } catch {  } finally { busy = false; }
+-        };
+-    }
+-}
+-
+-(globalThis as any).OmoriMod = OmoriMod;
+diff --git a/src/client/mods/archive.ts b/src/client/mods/archive.ts
+deleted file mode 100644
+index cfe794d..0000000
+--- a/src/client/mods/archive.ts
++++ /dev/null
+@@ -1,64 +0,0 @@
+-import { unzipSync } from 'fflate';
+-import { Archive } from 'libarchive.js';
+-
+-export { sniff } from '../../mods/sniff.ts';
+-import { sniff } from '../../mods/sniff.ts';
+-
+-export const ARCHIVE_ACCEPT = '.zip,.7z,.rar,.tar,.gz,.tgz,.bz2,.tbz2,.xz,.txz,.mod,.omm,application/zip,application/x-7z-compressed,application/vnd.rar,application/x-rar-compressed,application/x-tar,application/gzip';
+-
+-let ready = false;
+-function init() {
+-    if (ready) return;
+-    ready = true;
+-    Archive.init({ workerUrl: '/vendor/libarchive/worker-bundle.js' });
+-}
+-
+-export class ArchiveError extends Error {}
+-
+-type Nested = { [name: string]: File | Nested };
+-
+-function flatten(tree: Nested, prefix = '', out: [string, File][] = []): [string, File][] {
+-    for (const [name, v] of Object.entries(tree)) {
+-        if (v instanceof Blob) out.push([prefix + name, v as File]);
+-        else flatten(v, `${prefix}${name}/`, out);
+-    }
+-    return out;
+-}
+-
+-export interface ReadOptions {
+-    onProgress?(message: string): void;
+-    askPassword?(): string | null;
+-}
+-
+-export async function readArchive(file: File, opts: ReadOptions = {}): Promise<Record<string, Uint8Array>> {
+-    const head = new Uint8Array(await file.slice(0, 600).arrayBuffer());
+-    const fmt = sniff(head);
+-    if (fmt === 'unknown') throw new ArchiveError(`${file.name}: not a recognised archive (supported: zip, 7z, rar, tar, tar.gz, tar.bz2, tar.xz)`);
+-
+-    if (fmt === 'zip') {
+-        try { return unzipSync(new Uint8Array(await file.arrayBuffer())); }
+-        catch (e) { throw new ArchiveError(`${file.name}: damaged or unsupported zip (${(e as Error).message})`); }
+-    }
+-
+-    opts.onProgress?.(`Unpacking ${file.name} (${fmt})…`);
+-    init();
+-    let archive;
+-    try { archive = await Archive.open(file); }
+-    catch (e) { throw new ArchiveError(`${file.name}: could not open this ${fmt} archive (${(e as Error).message ?? e})`); }
+-    try {
+-        if ((await archive.hasEncryptedData()) === true) {
+-            const pw = opts.askPassword?.() ?? null;
+-            if (pw === null) throw new ArchiveError(`${file.name} is password protected`);
+-            await archive.usePassword(pw);
+-        }
+-        let tree: Nested;
+-        try { tree = (await archive.extractFiles()) as Nested; }
+-        catch (e) { throw new ArchiveError(`${file.name}: extraction failed (${(e as Error).message ?? e}). A wrong password or a damaged archive are the usual causes.`); }
+-        const out: Record<string, Uint8Array> = {};
+-        for (const [path, f] of flatten(tree)) out[path] = new Uint8Array(await f.arrayBuffer());
+-        if (!Object.keys(out).length) throw new ArchiveError(`${file.name} is empty`);
+-        return out;
+-    } finally {
+-        await (archive as unknown as { close?(): Promise<void> }).close?.().catch(() => {});
+-    }
+-}
+diff --git a/src/client/mods/compat.ts b/src/client/mods/compat.ts
+deleted file mode 100644
+index 0454cdc..0000000
+--- a/src/client/mods/compat.ts
++++ /dev/null
+@@ -1,102 +0,0 @@
+-import { applyJsonPatch } from '../../mods/patch.ts';
+-import type { LoadedMod } from '../../mods/engine.ts';
+-import type { PluginRule } from '../../mods/manifest.ts';
+-import { engine } from './runtime.ts';
+-import { report } from './api.ts';
+-
+-const g = globalThis as any;
+-
+-export interface OrderingRule { culprit: string; rule: PluginRule }
+-
+-export interface ModLoaderShim {
+-    $log(...a: unknown[]): void;
+-    config: Record<string, unknown>;
+-    syncConfig(): void;
+-    knownMods: Map<string, unknown>;
+-    allMods: Map<string, unknown>;
+-    mods: Map<string, unknown>;
+-    pluginLocks: Set<string>;
+-    pluginOrderingRules: Map<string, OrderingRule>;
+-    success: boolean;
+-    overlayFS: Record<string, unknown>;
+-    $nwMajor: number;
+-    isInTestMode: boolean;
+-    realArgv: string[];
+-}
+-
+-const lower = (s: string) => s.toLowerCase();
+-
+-const pluginNameOf = (target: string) => lower(target.slice(target.lastIndexOf('/') + 1).replace(/\.[^.]*$/, ''));
+-
+-export function installModLoaderShim(mods: LoadedMod[]): ModLoaderShim {
+-    const pluginLocks = new Set<string>();
+-    const pluginOrderingRules = new Map<string, OrderingRule>();
+-
+-    for (const m of mods) {
+-        for (const e of m.edits) {
+-            if (e.kind === 'append' && /^js\/plugins\//i.test(e.target)) {
+-                const n = pluginNameOf(e.target);
+-                pluginLocks.add(n);
+-                pluginOrderingRules.set(n, { culprit: m.id, rule: { at: -1 } });
+-            }
+-        }
+-    }
+-    for (const m of mods) {
+-        for (const n of m.pluginFiles) {
+-            if (pluginLocks.has(n) && pluginOrderingRules.get(n)?.culprit !== m.id) {
+-                report(m.id, new Error(`plugin "${n}" is also provided by "${pluginOrderingRules.get(n)!.culprit}"; the later mod replaces it`), '', 'warn');
+-            }
+-            pluginOrderingRules.set(n, { culprit: m.id, rule: m.pluginOrder[n] ?? { at: -1 } });
+-            pluginLocks.add(n);
+-        }
+-    }
+-
+-    const entry = (m: LoadedMod) => ({ json: m.json, files: [], plugins: m.pluginFiles, pluginsDelta: [], imageDelta: m.imageDeltas, _raw: m });
+-    const known = new Map(mods.map(m => [m.id, entry(m)]));
+-    const shim: ModLoaderShim = {
+-        $log: (...a) => console.log('[OneLoader]', ...a),
+-        config: {},
+-        syncConfig() {},
+-        knownMods: known,
+-        allMods: new Map(mods.map(m => [m.id, m.json])),
+-        mods: new Map(mods.map(m => [m.id, { enabled: true, meta: m.json, id: m.id }])),
+-        pluginLocks,
+-        pluginOrderingRules,
+-        success: true,
+-        overlayFS: {},
+-        $nwMajor: 0,
+-        isInTestMode: false,
+-        realArgv: [],
+-    };
+-    g.$modLoader = shim;
+-    g._logLine = (...a: unknown[]) => console.log('[OneLoader]', ...a);
+-    return shim;
+-}
+-
+-const AsyncFunction = Object.getPrototypeOf(async function () {  }).constructor as new (...args: string[]) => (...a: unknown[]) => Promise<unknown>;
+-
+-export async function runExec(mod: LoadedMod, file: string, style: 'eval' | 'require', params: Record<string, unknown>): Promise<void> {
+-    const code = new TextDecoder().decode(mod.tree.read(file)) + `\n//# sourceURL=omori-mod://${mod.id}/${file}`;
+-    try {
+-        if (style === 'eval') {
+-            await new AsyncFunction('params', code)({ ...params, mod: { json: mod.json, id: mod.id } });
+-        } else {
+-            const module: { exports: unknown } = { exports: {} };
+-            new Function('module', 'exports', 'require', code)(module, module.exports, g.require);
+-            if (typeof module.exports === 'function') await (module.exports as (...a: unknown[]) => unknown)(g.$modLoader, window, params);
+-        }
+-    } catch (e) {
+-        report(mod.id, e, `script ${file}${style === 'require' ? ' (module)' : ''}`);
+-    }
+-}
+-
+-export function applyPluginParameters(mods: LoadedMod[], plugins: { name: string; parameters: Record<string, unknown> }[]) {
+-    for (const m of mods) {
+-        for (const [name, patch] of Object.entries(m.pluginParameters)) {
+-            const p = plugins.find(x => lower(x.name) === lower(name));
+-            if (!p) { engine.log('warn', `plugin_parameters for "${name}" ignored: the game has no such plugin`, { mod: m.id }); continue; }
+-            try { p.parameters = applyJsonPatch(p.parameters, patch as never) as Record<string, unknown>; }
+-            catch (e) { report(m.id, e, `plugin_parameters for ${name}`); }
+-        }
+-    }
+-}
+diff --git a/src/client/mods/olid.ts b/src/client/mods/olid.ts
+deleted file mode 100644
+index b3ea150..0000000
+--- a/src/client/mods/olid.ts
++++ /dev/null
+@@ -1,129 +0,0 @@
+-import { unzipSync, unzlibSync } from 'fflate';
+-import type { LoadedMod, ModEngine } from '../../mods/engine.ts';
+-import { report } from './api.ts';
+-import { cacheGet, cachePut, getSupport } from './store.ts';
+-
+-interface BitDiff { tile_size(): number; apply_diff(source: Uint32Array, bitstream: Uint8Array): Uint32Array }
+-
+-let decoder: Promise<BitDiff | null> | null = null;
+-
+-function loadDecoder(): Promise<BitDiff | null> {
+-    return (decoder ??= (async () => {
+-        const zip = await getSupport('imagediff2');
+-        if (!zip) return null;
+-        const files = unzipSync(zip);
+-        const js = files['imagediff2.js'], wasm = files['imagediff2_bg.wasm'];
+-        if (!js || !wasm) return null;
+-        const init = new Function(`${new TextDecoder().decode(js)}\nreturn wasm_bindgen;`)() as ((w: BufferSource) => Promise<unknown>) & BitDiff;
+-        await init(wasm);
+-        return init;
+-    })());
+-}
+-
+-const hex = (b: Uint8Array) => Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+-async function sha256(b: Uint8Array | string): Promise<string> {
+-    const data = typeof b === 'string' ? new TextEncoder().encode(b) : b;
+-    return hex(new Uint8Array(await crypto.subtle.digest('SHA-256', data as BufferSource)));
+-}
+-
+-interface Delta { salt: string; stream: Uint8Array; width: number; height: number; mod: string }
+-
+-function parseOlid(bytes: Uint8Array, mod: string): Delta | null {
+-    if (bytes.length < 26) return null;
+-    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+-    if (dv.getUint32(0) !== 0xfeffd808 && dv.getUint32(4) !== 0xdd21) return null;
+-    return { salt: hex(bytes.slice(14, 22)), stream: bytes.slice(26), width: dv.getUint32(6), height: dv.getUint32(10), mod };
+-}
+-
+-async function toCanvas(png: Uint8Array): Promise<{ bitmap: ImageBitmap }> {
+-    return { bitmap: await createImageBitmap(new Blob([png as BlobPart], { type: 'image/png' })) };
+-}
+-
+-async function patchImage(dec: BitDiff, basePng: Uint8Array, deltas: Delta[]): Promise<Uint8Array> {
+-    const e = dec.tile_size();
+-    const targetW = Math.max(...deltas.map(d => d.width)), targetH = Math.max(...deltas.map(d => d.height));
+-    const { bitmap } = await toCanvas(basePng);
+-    const canvas = document.createElement('canvas');
+-    canvas.width = Math.ceil(targetW / 16) * 16; canvas.height = Math.ceil(targetH / 16) * 16;
+-    const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+-    ctx.drawImage(bitmap, 0, 0);
+-
+-    for (const delta of deltas) {
+-        const bits = unzlibSync(delta.stream);
+-        const dv = new DataView(bits.buffer, bits.byteOffset, bits.byteLength);
+-        for (let p = 0; p < bits.byteLength;) {
+-            const tx = dv.getUint16(p), ty = dv.getUint16(p + 2), len = dv.getUint32(p + 4);
+-            p += 8;
+-            const tile = bits.slice(p, p + len); p += len;
+-            const src = bitmap.width < tx * e || bitmap.height < ty * e ? new ArrayBuffer(e * e * 4) : ctx.getImageData(tx * e, ty * e, e, e).data.buffer;
+-            const out = dec.apply_diff(new Uint32Array(src), tile);
+-            const pixels = new Uint8ClampedArray(new ArrayBuffer(e * e * 4));
+-            pixels.set(new Uint8Array(out.buffer, out.byteOffset, e * e * 4));
+-            ctx.putImageData(new ImageData(pixels, e, e), tx * e, ty * e);
+-        }
+-    }
+-    let final = canvas;
+-    if (canvas.width !== targetW || canvas.height !== targetH) {
+-        final = document.createElement('canvas'); final.width = targetW; final.height = targetH;
+-        final.getContext('2d')!.drawImage(canvas, 0, 0);
+-    }
+-    const blob = await new Promise<Blob>((res, rej) => final.toBlob(b => (b ? res(b) : rej(new Error('PNG encode failed'))), 'image/png'));
+-    bitmap.close();
+-    return new Uint8Array(await blob.arrayBuffer());
+-}
+-
+-export interface OlidResult { applied: number; failed: number; missingDecoder: boolean; generated: Record<string, Uint8Array> }
+-
+-export async function applyImageDeltas(engine: ModEngine, onProgress?: (done: number, total: number, name: string) => void): Promise<OlidResult> {
+-    const result: OlidResult = { applied: 0, failed: 0, missingDecoder: false, generated: {} };
+-    const jobs = new Map<string, { target: string; items: { mod: LoadedMod; source: string }[] }>();
+-    for (const m of engine.activeMods()) {
+-        for (const d of m.imageDeltas) {
+-            const k = d.target.toLowerCase();
+-            (jobs.get(k) ?? jobs.set(k, { target: d.target, items: [] }).get(k)!).items.push({ mod: m, source: d.source });
+-        }
+-    }
+-    if (!jobs.size) return result;
+-
+-    const dec = await loadDecoder().catch(e => { report('(image patches)', e, 'could not start the image decoder'); return null; });
+-    if (!dec) {
+-        result.missingDecoder = true;
+-        report('(image patches)', new Error(`${jobs.size} image patch(es) from ${[...new Set([...jobs.values()].flatMap(j => j.items.map(i => i.mod.id)))].join(', ')} were skipped: the image decoder is missing. Import the full OneLoader/OMO-CEP pack once and it is kept for later.`), '', 'warn');
+-        return result;
+-    }
+-
+-    let done = 0;
+-    for (const { target, items } of jobs.values()) {
+-        onProgress?.(done++, jobs.size, target);
+-        try {
+-            const deltas: Delta[] = [];
+-            for (const it of items) {
+-                const d = parseOlid(it.mod.tree.read(it.source), it.mod.id);
+-                if (d) deltas.push(d); else report(it.mod.id, new Error(`${it.source} is not a valid image delta`), '', 'warn');
+-            }
+-            if (!deltas.length) continue;
+-            deltas.sort((a, b) => (a.salt > b.salt ? 1 : -1));
+-
+-            const rpg = target.replace(/\.png$/i, '.rpgmvp');
+-            let encBase = engine.hasEdits(rpg) ? engine.resolve(rpg, () => null) : null;
+-            if (!encBase) {
+-                const r = await fetch(`/${rpg.split('/').map(encodeURIComponent).join('/')}?__vanilla=1`, { cache: 'no-store' });
+-                if (!r.ok) throw new Error(`the game has no ${rpg}`);
+-                encBase = new Uint8Array(await r.arrayBuffer());
+-            }
+-            const basePng = engine.decryptAsset(encBase);
+-            const key = await sha256(`${target}+${await sha256(basePng)}:${deltas.map(d => d.salt).join(':')}`);
+-            let png = await cacheGet(key);
+-            if (!png) { png = await patchImage(dec, basePng, deltas); void cachePut(key, png); }
+-            const finished = engine.encryptAsset(png);
+-            engine.setGenerated(rpg, finished);
+-            result.generated[rpg] = finished;
+-            result.applied++;
+-        } catch (e) {
+-            result.failed++;
+-            report(items[0]!.mod.id, e, `image patch for ${target}`);
+-        }
+-    }
+-    onProgress?.(jobs.size, jobs.size, '');
+-    return result;
+-}
+diff --git a/src/client/mods/plugins.ts b/src/client/mods/plugins.ts
+deleted file mode 100644
+index cf54f86..0000000
+--- a/src/client/mods/plugins.ts
++++ /dev/null
+@@ -1,44 +0,0 @@
+-import type { LoadedMod } from '../../mods/engine.ts';
+-import { applyPluginParameters, type ModLoaderShim } from './compat.ts';
+-
+-interface Entry { name: string; status: boolean; description: string; parameters: Record<string, unknown>; _w?: number }
+-const lower = (s: string) => s.toLowerCase();
+-const modded = (name: string, weight?: number): Entry => ({ name, status: true, description: 'Modded plugin', parameters: {}, ...(weight === undefined ? {} : { _w: weight }) });
+-
+-export function patchPluginList(plugins: Entry[], mods: LoadedMod[], shim: ModLoaderShim): { added: string[] } {
+-    const gameSupplied = plugins.map(p => lower(p.name));
+-    const added: string[] = [];
+-
+-    const injections: Entry[][] = Array.from({ length: plugins.length + 1 }, () => []);
+-    for (const [name, { rule }] of shim.pluginOrderingRules) {
+-        if (gameSupplied.includes(name)) continue;
+-        let at = rule.at ?? -1;
+-        if (rule.after) {
+-            const i = plugins.findIndex(p => lower(p.name) === lower(rule.after!));
+-            if (i >= 0) at = i + 1;
+-        }
+-        if (at < 0) continue;
+-        if (at >= injections.length) at = injections.length - 1;
+-        injections[at]!.push(modded(name, rule.weight ?? 0));
+-        added.push(name);
+-    }
+-    for (let i = injections.length - 1; i >= 0; i--) {
+-        if (!injections[i]!.length) continue;
+-        injections[i]!.sort((a, b) => b._w! - a._w!);
+-        plugins.splice(i, 0, ...injections[i]!);
+-    }
+-
+-    const neg: Entry[] = [], mid: Entry[] = [], pos: Entry[] = [];
+-    for (const name of shim.pluginLocks) {
+-        const rule = shim.pluginOrderingRules.get(name)?.rule;
+-        if (!rule || gameSupplied.includes(name) || (rule.at ?? -1) !== -1) continue;
+-        if (plugins.some(p => lower(p.name) === name)) continue;
+-        const w = rule.weight ?? 0;
+-        (w < 0 ? neg : w > 0 ? pos : mid).push(modded(name, w));
+-        added.push(name);
+-    }
+-    plugins.push(...pos.sort((a, b) => b._w! - a._w!), ...mid, ...neg.sort((a, b) => b._w! - a._w!));
+-
+-    applyPluginParameters(mods, plugins);
+-    return { added };
+-}
+diff --git a/src/client/mods/runtime.ts b/src/client/mods/runtime.ts
+deleted file mode 100644
+index 3f4aeda..0000000
+--- a/src/client/mods/runtime.ts
++++ /dev/null
+@@ -1,151 +0,0 @@
+-import { ModEngine, assetKeyFromSystem, type Diagnostic, type LoadedMod } from '../../mods/engine.ts';
+-import type { ClientScript } from '../../mods/manifest.ts';
+-import { zipTreeFromBytes } from '../../mods/vfs.ts';
+-import { setModLayer } from '../shim/fs.ts';
+-import { modInfo, report, setCurrent } from './api.ts';
+-import { installModLoaderShim, runExec, type ModLoaderShim } from './compat.ts';
+-import { applyImageDeltas } from './olid.ts';
+-import { patchPluginList } from './plugins.ts';
+-import { enabledKeys, getActiveProfile, listMods, replaceGenerated, setMeta, syncServerMods, type ModRecord, type Profile } from './store.ts';
+-
+-export const SAFE_MODE = new URLSearchParams(location.search).get('mods') === '0';
+-
+-let key = '';
+-export const engine = new ModEngine(() => key, (d: Diagnostic) => {
+-    if (d.level === 'info') return;
+-    report(d.mod ?? '(mods)', new Error(d.message), '', d.level === 'warn' ? 'warn' : 'error');
+-});
+-export let records: ModRecord[] = [];
+-export let profile: Profile | null = null;
+-let shim: ModLoaderShim | null = null;
+-
+-const hex = (b: Uint8Array) => Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+-
+-function bootStatus() {
+-    const el = document.createElement('div');
+-    el.setAttribute('style', 'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:2147483200;background:#000c;color:#fff;font:13px system-ui,sans-serif;padding:8px 14px;border-radius:6px;pointer-events:none');
+-    document.body.append(el);
+-    return { set: (t: string) => { el.textContent = t; }, done: () => el.remove() };
+-}
+-
+-async function prepareAssetKey(): Promise<void> {
+-    const r = await fetch('/data/System.KEL', { cache: 'no-store' });
+-    if (!r.ok) throw new Error('could not read the game\'s System data');
+-    const system = JSON.parse(new TextDecoder().decode(engine.decrypt(new Uint8Array(await r.arrayBuffer()))));
+-    engine.assetKey = assetKeyFromSystem(system);
+-    await setMeta('assetKey', hex(engine.assetKey));
+-}
+-
+-export async function initMods(gameKey: string): Promise<void> {
+-    key = gameKey;
+-    try {
+-        profile = await getActiveProfile();
+-        records = (await listMods()).sort((a, b) => a.key.localeCompare(b.key));
+-    } catch (e) { report('(mods)', e, 'could not read profiles'); }
+-    if (SAFE_MODE) {
+-        console.warn('[mods] safe mode (?mods=0): no mods loaded');
+-        await syncServiceWorker(true);
+-        return;
+-    }
+-    try {
+-        await syncServerMods();
+-        records = (await listMods()).sort((a, b) => a.key.localeCompare(b.key));
+-        const on = enabledKeys(profile!, records);
+-        engine.load(records.map(r => {
+-            try { return { label: r.label, tree: zipTreeFromBytes(r.zip, r.stamp), origin: r.key, disabled: !on.has(r.key) }; }
+-            catch (e) { report(r.label, e, 'not a valid zip'); return null; }
+-        }).filter((x): x is NonNullable<typeof x> => !!x));
+-    } catch (e) {
+-        report('(mods)', e, 'could not load the mod store');
+-        return;
+-    }
+-    modInfo.splice(0, modInfo.length, ...engine.mods.map(m => ({ id: m.id, name: m.name, version: m.version, enabled: m.enabled })));
+-    setModLayer({
+-        has: k => engine.hasEdits(k) && engine.isEncrypted(k),
+-        resolve: (k, base) => engine.resolve(k, base),
+-        added: dir => engine.addedNames(dir),
+-    });
+-    shim = installModLoaderShim(engine.activeMods());
+-
+-    const active = engine.activeMods();
+-    const wantsImages = active.some(m => m.imageDeltas.length);
+-    if (engine.hasAssetEdits() || wantsImages) {
+-        try { await prepareAssetKey(); } catch (e) { report('(mods)', e, 'replaced images and audio cannot be applied'); }
+-    }
+-    let generated: Record<string, Uint8Array> = {};
+-    if (wantsImages && engine.assetKey) {
+-        const status = bootStatus();
+-        try {
+-            const r = await applyImageDeltas(engine, (done, total, name) => status.set(`Patching images ${done}/${total}${name ? ` · ${name.split('/').pop()}` : ''}`));
+-            generated = r.generated;
+-        } finally { status.done(); }
+-    }
+-    await replaceGenerated(generated).catch(e => report('(mods)', e, 'could not save patched images'));
+-    await syncServiceWorker();
+-}
+-
+-async function syncServiceWorker(safe = false): Promise<void> {
+-    if (!('serviceWorker' in navigator)) {
+-        if (engine.hasAssetEdits()) report('(mods)', new Error('this browser has no service worker support; mods that replace images/audio will not apply'), '', 'warn');
+-        return;
+-    }
+-    const existing = await navigator.serviceWorker.getRegistration('/');
+-    if (safe) { if (existing) navigator.serviceWorker.controller?.postMessage({ type: 'reload', safe: true }); return; }
+-    if (!engine.hasAssetEdits()) { if (existing) navigator.serviceWorker.controller?.postMessage({ type: 'reload', safe: true }); await existing?.unregister(); return; }
+-    try {
+-        const reg = existing ?? await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+-        await navigator.serviceWorker.ready;
+-        if (!navigator.serviceWorker.controller) {
+-            await Promise.race([
+-                new Promise<void>(res => navigator.serviceWorker.addEventListener('controllerchange', () => res(), { once: true })),
+-                new Promise<void>(res => setTimeout(res, 4000)),
+-            ]);
+-        }
+-        const sw = navigator.serviceWorker.controller ?? reg.active;
+-        if (!sw) throw new Error('service worker did not take control');
+-        await new Promise<void>((res, rej) => {
+-            const t = setTimeout(() => rej(new Error('service worker did not answer')), 15000);
+-            navigator.serviceWorker.addEventListener('message', function h(e) {
+-                if (e.data?.type !== 'reloaded') return;
+-                clearTimeout(t); navigator.serviceWorker.removeEventListener('message', h);
+-                e.data.error ? rej(new Error('service worker failed to read mods')) : res();
+-            });
+-            sw.postMessage({ type: 'reload' });
+-        });
+-    } catch (e) {
+-        report('(mods)', e, 'asset mods may not apply');
+-    }
+-}
+-
+-function paramsFor(phase: ClientScript['phase']): Record<string, unknown> {
+-    const g = globalThis as any;
+-    if (phase === 'pre-plugins') return { PluginManager: g.PluginManager, $plugins: g.$plugins };
+-    return { knownMods: shim?.knownMods ?? new Map(), $modLoader: shim };
+-}
+-
+-export async function runPhase(phase: ClientScript['phase']): Promise<void> {
+-    const items: { mod: LoadedMod; script: NonNullable<LoadedMod['scripts']>[number]; at: number }[] = [];
+-    engine.activeMods().forEach((mod, at) => mod.scripts.filter(s => s.phase === phase).forEach(script => items.push({ mod, script, at })));
+-    items.sort((a, b) => (a.script.rank ?? 0) - (b.script.rank ?? 0) || a.at - b.at);
+-    for (const { mod: m, script: s } of items) {
+-        if (s.style === 'eval' || s.style === 'require') { await runExec(m, s.file, s.style, paramsFor(phase)); continue; }
+-        try {
+-            const code = new TextDecoder().decode(m.tree.read(s.file));
+-            const el = document.createElement('script');
+-            el.textContent = `${code}\n//# sourceURL=omori-mod://${m.id}/${s.file}`;
+-            setCurrent({ id: m.id, file: s.file });
+-            document.head.appendChild(el);
+-            el.remove();
+-        } catch (e) {
+-            report(m.id, e, `script ${s.file} (${phase})`);
+-        } finally { setCurrent(null); }
+-    }
+-}
+-
+-export function patchPlugins(): void {
+-    if (!shim) return;
+-    try {
+-        const { added } = patchPluginList((globalThis as any).$plugins, engine.activeMods(), shim);
+-        if (added.length) console.log(`[mods] added ${added.length} plugin(s) to the game: ${added.join(', ')}`);
+-    } catch (e) { report('(mods)', e, 'could not patch the plugin list'); }
+-}
+diff --git a/src/client/mods/store.ts b/src/client/mods/store.ts
+deleted file mode 100644
+index 6316bb3..0000000
+--- a/src/client/mods/store.ts
++++ /dev/null
+@@ -1,223 +0,0 @@
+-import { unzipSync, zipSync } from 'fflate';
+-
+-export interface ModRecord {
+-    key: string;
+-    label: string;
+-    origin: 'browser' | 'server';
+-    zip: Uint8Array;
+-    stamp: string;
+-}
+-
+-export interface Profile {
+-    id: string;
+-    name: string;
+-    created: number;
+-    enabled: string[];
+-    devAuto: boolean;
+-    fsDb: string;
+-}
+-
+-export interface Backup { id: string; profile: string; profileName: string; time: number; reason: string; zip: Uint8Array; files: number }
+-
+-export const DEFAULT_PROFILE = 'default';
+-const DB = 'omori-mods';
+-const DB_VERSION = 3;
+-const MAX_BACKUPS_PER_PROFILE = 5;
+-
+-function open(): Promise<IDBDatabase> {
+-    return new Promise((res, rej) => {
+-        const r = indexedDB.open(DB, DB_VERSION);
+-        r.onupgradeneeded = () => {
+-            const db = r.result;
+-            for (const [name, opts] of [['mods', { keyPath: 'key' }], ['profiles', { keyPath: 'id' }], ['backups', { keyPath: 'id' }], ['meta', undefined], ['gen', undefined], ['olidcache', undefined]] as const) {
+-                if (!db.objectStoreNames.contains(name)) db.createObjectStore(name, opts);
+-            }
+-        };
+-        r.onsuccess = () => res(r.result);
+-        r.onerror = () => rej(r.error ?? new Error('cannot open the mod database (private browsing?)'));
+-    });
+-}
+-
+-const done = <T>(r: IDBRequest<T>) => new Promise<T>((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+-
+-async function tx<T>(store: string, mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<T>): Promise<T> {
+-    const db = await open();
+-    try { return await done(fn(db.transaction(store, mode).objectStore(store))); } finally { db.close(); }
+-}
+-
+-const SUPPORT_PREFIX = 'support:';
+-export const listMods = async () => ((await tx('mods', 'readonly', s => s.getAll())) as ModRecord[]).filter(r => !r.key.startsWith(SUPPORT_PREFIX));
+-export const putMod = (rec: ModRecord) => tx('mods', 'readwrite', s => s.put(rec));
+-
+-export const putSupport = (name: string, zip: Uint8Array) => putMod({ key: SUPPORT_PREFIX + name, label: name, origin: 'browser', zip, stamp: String(zip.length) });
+-export async function getSupport(name: string): Promise<Uint8Array | null> {
+-    const rec = (await tx('mods', 'readonly', s => s.get(SUPPORT_PREFIX + name))) as ModRecord | undefined;
+-    return rec?.zip ?? null;
+-}
+-
+-export const getMeta = <T>(key: string) => tx('meta', 'readonly', s => s.get(key)) as Promise<T | undefined>;
+-export const setMeta = (key: string, value: unknown) => tx('meta', 'readwrite', s => s.put(value, key));
+-
+-export async function replaceGenerated(files: Record<string, Uint8Array>): Promise<void> {
+-    const db = await open();
+-    try {
+-        await new Promise<void>((res, rej) => {
+-            const t = db.transaction('gen', 'readwrite'), st = t.objectStore('gen');
+-            st.clear();
+-            for (const [k, v] of Object.entries(files)) st.put(v.slice().buffer, k);
+-            t.oncomplete = () => res(); t.onerror = t.onabort = () => rej(t.error);
+-        });
+-    } finally { db.close(); }
+-}
+-export async function readGenerated(): Promise<Record<string, Uint8Array>> {
+-    const db = await open(), out: Record<string, Uint8Array> = {};
+-    try {
+-        await new Promise<void>((res, rej) => {
+-            const req = db.transaction('gen').objectStore('gen').openCursor();
+-            req.onsuccess = () => { const c = req.result; if (!c) return res(); out[String(c.key)] = new Uint8Array(c.value as ArrayBuffer); c.continue(); };
+-            req.onerror = () => rej(req.error);
+-        });
+-    } finally { db.close(); }
+-    return out;
+-}
+-
+-export async function cacheGet(key: string): Promise<Uint8Array | null> {
+-    const v = (await tx('olidcache', 'readonly', s => s.get(key))) as ArrayBuffer | undefined;
+-    return v ? new Uint8Array(v) : null;
+-}
+-export const cachePut = (key: string, bytes: Uint8Array) => tx('olidcache', 'readwrite', s => s.put(bytes.slice().buffer, key));
+-
+-export async function removeMod(key: string): Promise<void> {
+-    await tx('mods', 'readwrite', s => s.delete(key));
+-    for (const p of await listProfiles()) if (p.enabled.includes(key)) await saveProfile({ ...p, enabled: p.enabled.filter(k => k !== key) });
+-}
+-
+-export async function syncServerMods(): Promise<void> {
+-    let list: { label: string; stamp: string }[];
+-    try {
+-        const r = await fetch('/__mods/list', { cache: 'no-store' });
+-        if (!r.ok) return;
+-        list = (await r.json()).mods;
+-    } catch { return; }
+-    const have = new Map((await listMods()).filter(r => r.origin === 'server').map(r => [r.label, r]));
+-    for (const m of list) {
+-        const old = have.get(m.label);
+-        have.delete(m.label);
+-        if (old?.stamp === m.stamp) continue;
+-        const r = await fetch('/__mods/pack?name=' + encodeURIComponent(m.label), { cache: 'no-store' });
+-        if (!r.ok) continue;
+-        await putMod({ key: 'server:' + m.label, label: m.label, origin: 'server', zip: new Uint8Array(await r.arrayBuffer()), stamp: m.stamp });
+-    }
+-    for (const stale of have.values()) await removeMod(stale.key);
+-}
+-
+-const defaultProfile = (): Profile => ({ id: DEFAULT_PROFILE, name: 'Original game', created: 0, enabled: [], devAuto: false, fsDb: 'omori-fs' });
+-
+-export async function listProfiles(): Promise<Profile[]> {
+-    const all = (await tx('profiles', 'readonly', s => s.getAll())) as Profile[];
+-    if (!all.some(p => p.id === DEFAULT_PROFILE)) { const d = defaultProfile(); await saveProfile(d); all.unshift(d); }
+-    return all.sort((a, b) => a.created - b.created);
+-}
+-export const saveProfile = (p: Profile) => tx('profiles', 'readwrite', s => s.put(p));
+-
+-export async function getActiveProfile(): Promise<Profile> {
+-    const all = await listProfiles();
+-    const asked = new URLSearchParams(location.search).get('profile');
+-    const stored = (await tx('meta', 'readonly', s => s.get('active'))) as string | undefined;
+-    const pick = all.find(p => p.id === asked) ?? all.find(p => p.id === stored) ?? all.find(p => p.id === DEFAULT_PROFILE)!;
+-    if (pick.id !== stored) await setActiveProfile(pick.id);
+-    return pick;
+-}
+-export const setActiveProfile = (id: string) => tx('meta', 'readwrite', s => s.put(id, 'active'));
+-
+-export function enabledKeys(p: Profile, mods: ModRecord[]): Set<string> {
+-    const on = new Set(p.enabled);
+-    if (p.devAuto) for (const m of mods) if (m.origin === 'server') on.add(m.key);
+-    return on;
+-}
+-
+-export async function createProfile(name: string, opts: { copySavesFrom?: string; enabled?: string[] } = {}): Promise<Profile> {
+-    const id = Math.random().toString(36).slice(2, 10);
+-    const p: Profile = { id, name: name.trim() || 'New profile', created: Date.now(), enabled: opts.enabled ?? [], devAuto: false, fsDb: 'omori-fs:' + id };
+-    if (opts.copySavesFrom) {
+-        const src = (await listProfiles()).find(x => x.id === opts.copySavesFrom);
+-        if (src) await writeAllFs(p.fsDb, await readAllFs(src.fsDb));
+-    }
+-    await saveProfile(p);
+-    return p;
+-}
+-
+-export async function deleteProfile(id: string): Promise<void> {
+-    if (id === DEFAULT_PROFILE) throw new Error('the original profile cannot be deleted');
+-    const p = (await listProfiles()).find(x => x.id === id);
+-    if (!p) return;
+-    await makeBackup(p, 'before delete');
+-    await tx('profiles', 'readwrite', s => s.delete(id));
+-    await new Promise<void>(res => { const r = indexedDB.deleteDatabase(p.fsDb); r.onsuccess = r.onerror = r.onblocked = () => res(); });
+-}
+-
+-function openFs(name: string): Promise<IDBDatabase> {
+-    return new Promise((res, rej) => {
+-        const r = indexedDB.open(name, 1);
+-        r.onupgradeneeded = () => { if (!r.result.objectStoreNames.contains('f')) r.result.createObjectStore('f'); };
+-        r.onsuccess = () => res(r.result);
+-        r.onerror = () => rej(r.error);
+-    });
+-}
+-
+-export async function readAllFs(dbName: string): Promise<Record<string, Uint8Array>> {
+-    const db = await openFs(dbName), out: Record<string, Uint8Array> = {};
+-    try {
+-        await new Promise<void>((res, rej) => {
+-            const req = db.transaction('f').objectStore('f').openCursor();
+-            req.onsuccess = () => {
+-                const c = req.result;
+-                if (!c) return res();
+-                if (c.value) out[String(c.key)] = new Uint8Array(c.value as ArrayBuffer);
+-                c.continue();
+-            };
+-            req.onerror = () => rej(req.error);
+-        });
+-    } finally { db.close(); }
+-    return out;
+-}
+-
+-export async function writeAllFs(dbName: string, files: Record<string, Uint8Array>): Promise<void> {
+-    const db = await openFs(dbName);
+-    try {
+-        await new Promise<void>((res, rej) => {
+-            const t = db.transaction('f', 'readwrite'), s = t.objectStore('f');
+-            s.clear();
+-            for (const [k, v] of Object.entries(files)) s.put(v.slice().buffer, k);
+-            t.oncomplete = () => res();
+-            t.onerror = t.onabort = () => rej(t.error);
+-        });
+-    } finally { db.close(); }
+-}
+-
+-export async function makeBackup(p: Profile, reason: string): Promise<Backup | null> {
+-    const files = await readAllFs(p.fsDb);
+-    const n = Object.keys(files).length;
+-    if (!n) return null;
+-    const b: Backup = { id: `${p.id}-${Date.now()}`, profile: p.id, profileName: p.name, time: Date.now(), reason, zip: zipSync(files, { level: 3 }), files: n };
+-    await tx('backups', 'readwrite', s => s.put(b));
+-    const mine = (await listBackups()).filter(x => x.profile === p.id);
+-    for (const old of mine.slice(MAX_BACKUPS_PER_PROFILE)) await tx('backups', 'readwrite', s => s.delete(old.id));
+-    return b;
+-}
+-
+-export async function listBackups(): Promise<Backup[]> {
+-    return ((await tx('backups', 'readonly', s => s.getAll())) as Backup[]).sort((a, b) => b.time - a.time);
+-}
+-export const deleteBackup = (id: string) => tx('backups', 'readwrite', s => s.delete(id));
+-
+-export async function restoreInto(target: Profile, zip: Uint8Array): Promise<number> {
+-    const files = unzipSync(zip);
+-    await makeBackup(target, 'before restore');
+-    await writeAllFs(target.fsDb, files);
+-    return Object.keys(files).length;
+-}
+-
+-export async function exportSaves(p: Profile): Promise<Uint8Array> {
+-    return zipSync(await readAllFs(p.fsDb), { level: 3 });
+-}
+diff --git a/src/client/mods/ui.ts b/src/client/mods/ui.ts
+deleted file mode 100644
+index ebce4ad..0000000
+--- a/src/client/mods/ui.ts
++++ /dev/null
+@@ -1,390 +0,0 @@
+-import { loadMod } from '../../mods/manifest.ts';
+-import { memTree, treeFromEntries, treeToZip, zipTreeFromBytes, type Tree } from '../../mods/vfs.ts';
+-import { planInstall } from '../../mods/pack.ts';
+-import { ARCHIVE_ACCEPT, ArchiveError, readArchive } from './archive.ts';
+-import { errors, onErrors } from './api.ts';
+-import { SAFE_MODE, engine, profile, records } from './runtime.ts';
+-import {
+-    DEFAULT_PROFILE, createProfile, deleteBackup, deleteProfile, exportSaves, listBackups, listMods, listProfiles, makeBackup, putMod,
+-    putSupport, removeMod, restoreInto, saveProfile, setActiveProfile, type Backup, type Profile,
+-} from './store.ts';
+-
+-const CSS = `
+-#omm-tab{position:fixed;top:0;left:0;z-index:2147483000;font:12px/1 system-ui,sans-serif;color:#fff;background:#000a;border:0;border-bottom-right-radius:6px;padding:6px 9px;cursor:pointer;opacity:.25;transition:opacity .15s}
+-#omm-tab:hover,#omm-tab.has-err{opacity:1}#omm-tab.has-err{background:#a11c}
+-#omm-panel{position:fixed;top:0;left:0;bottom:0;width:min(460px,100vw);z-index:2147483001;background:#101014f2;color:#e8e8ee;font:13px/1.45 system-ui,sans-serif;display:none;flex-direction:column;box-shadow:4px 0 24px #000a}
+-#omm-panel.open{display:flex}
+-#omm-panel header{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid #2a2a34}
+-#omm-panel h2{margin:0;font-size:15px;flex:1}
+-#omm-panel button,#omm-panel .btn{font:inherit;color:#fff;background:#2b2b38;border:1px solid #3a3a4a;border-radius:5px;padding:5px 10px;cursor:pointer}
+-#omm-panel button:hover{background:#383849}#omm-panel button:disabled{opacity:.4;cursor:default}
+-#omm-panel .primary{background:#3a56c8;border-color:#4c68dc}
+-#omm-panel select{font:inherit;color:#fff;background:#2b2b38;border:1px solid #3a3a4a;border-radius:5px;padding:5px 8px;max-width:100%;width:100%;margin-top:4px}
+-#omm-body{overflow:auto;padding:10px 14px;flex:1}
+-.omm-drop{border:2px dashed #3a3a4a;border-radius:8px;padding:16px;text-align:center;color:#9a9ab0;margin-bottom:12px}
+-.omm-box{border:1px solid #2a2a34;border-radius:8px;padding:10px 11px;margin-bottom:12px;background:#14141a}
+-.omm-btns{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+-.omm-note{color:#9a9ab0;font-size:12px;margin-top:6px}
+-.omm-mod{border:1px solid #2a2a34;border-radius:8px;padding:9px 11px;margin-bottom:8px;background:#16161c}
+-.omm-mod.off{opacity:.6}.omm-mod.bad{border-color:#a33}
+-.omm-row{display:flex;gap:8px;align-items:center}.omm-row .grow{flex:1;min-width:0}
+-.omm-name{font-weight:600}.omm-meta{color:#8a8aa0;font-size:12px}
+-.omm-msg{margin:6px 0 0;padding:6px 8px;border-radius:5px;font:12px/1.4 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-word}
+-.omm-msg.error{background:#3a1519;color:#ffb4b4}.omm-msg.warn{background:#352c12;color:#f2d98a}
+-.omm-h{margin:14px 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:#8a8aa0}
+-#omm-overlay{position:fixed;inset:0;z-index:2147483002;background:#0008;color:#fff;display:none;align-items:center;justify-content:center;font:600 22px system-ui,sans-serif;pointer-events:none;border:4px dashed #6c88ff}
+-#omm-overlay.show{display:flex}
+-#omm-toast{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);z-index:2147483003;background:#101014;color:#fff;border:1px solid #3a3a4a;border-radius:8px;padding:10px 14px;font:13px system-ui,sans-serif;display:none;gap:10px;align-items:center;flex-wrap:wrap;max-width:90vw}
+-#omm-toast.show{display:flex}
+-`;
+-
+-const el = <K extends keyof HTMLElementTagNameMap>(tag: K, props: Partial<Omit<HTMLElementTagNameMap[K], 'style'>> & { class?: string; style?: string } = {}, ...kids: (Node | string)[]) => {
+-    const e = document.createElement(tag);
+-    const { class: cls, style, ...rest } = props as any;
+-    if (cls) e.className = cls;
+-    if (style) e.setAttribute('style', style);
+-    Object.assign(e, rest);
+-    e.append(...kids);
+-    return e;
+-};
+-
+-let tab: HTMLButtonElement, panel: HTMLElement, body: HTMLElement, toast: HTMLElement, overlay: HTMLElement;
+-const failures: string[] = [];
+-
+-export function installModUi() {
+-    document.head.append(el('style', { textContent: CSS }));
+-    tab = el('button', { id: 'omm-tab', title: 'Mods & profiles (F8)', onclick: () => toggle() }, 'Mods');
+-    body = el('div', { id: 'omm-body' });
+-    panel = el('div', { id: 'omm-panel' },
+-        el('header', {}, el('h2', {}, 'Mods & profiles'),
+-            el('button', { id: 'omm-reload', class: 'primary', textContent: 'Apply & reload', style: 'display:none', onclick: () => location.reload() }),
+-            el('button', { textContent: '✕', title: 'Close (F8)', onclick: () => toggle(false) })),
+-        body);
+-    toast = el('div', { id: 'omm-toast' });
+-    overlay = el('div', { id: 'omm-overlay' }, 'Drop a mod (.zip, .7z, .rar or folder) to install');
+-    document.body.append(tab, panel, toast, overlay);
+-
+-    window.addEventListener('keydown', e => { if (e.key === 'F8') { e.preventDefault(); toggle(); } });
+-    onErrors(() => { refreshTab(); if (panel.classList.contains('open')) void render(); });
+-    installDragDrop();
+-    refreshTab();
+-}
+-
+-export const openModManager = () => toggle(true);
+-
+-function toggle(force?: boolean) {
+-    const open = force ?? !panel.classList.contains('open');
+-    panel.classList.toggle('open', open);
+-    if (open) void render();
+-}
+-
+-function refreshTab() {
+-    const n = errors.filter(e => e.level === 'error').length;
+-    const where = profile && profile.id !== DEFAULT_PROFILE ? ` · ${profile.name}` : '';
+-    tab.classList.toggle('has-err', n > 0);
+-    tab.textContent = n ? `Mods ⚠ ${n}${where}` : SAFE_MODE ? 'Mods (safe mode)' : `Mods${where}`;
+-}
+-
+-function say(text: string, ...actions: [string, () => void][]) {
+-    toast.replaceChildren(el('span', {}, text));
+-    actions.forEach(([label, fn], i) => toast.append(el('button', {
+-        textContent: label, onclick: fn,
+-        style: `font:inherit;color:#fff;background:${i ? '#2b2b38' : '#3a56c8'};border:0;border-radius:5px;padding:5px 10px;cursor:pointer`,
+-    })));
+-    toast.classList.add('show');
+-    clearTimeout((say as any).t);
+-    (say as any).t = setTimeout(() => toast.classList.remove('show'), actions.length ? 30000 : 5000);
+-}
+-
+-function markDirty() {
+-    document.getElementById('omm-reload')!.style.display = '';
+-    say('Changes apply after a reload.', ['Reload now', () => location.reload()]);
+-    void render();
+-}
+-
+-export interface InstallResult { ok: boolean; label: string; message: string }
+-
+-export async function installMod(label: string, zip: Uint8Array): Promise<InstallResult> {
+-    let tree: Tree;
+-    try { tree = zipTreeFromBytes(zip); } catch (e) { return { ok: false, label, message: `${label}: not a valid zip file (${(e as Error).message})` }; }
+-    const def = loadMod(tree, label);
+-    if (def.errors.length) return { ok: false, label, message: `${label} can't be installed:\n• ${def.errors.join('\n• ')}` };
+-    const key = 'browser:' + def.id;
+-    const existing = (await listMods()).find(r => r.key === key);
+-    await putMod({ key, label: def.id, origin: 'browser', zip, stamp: `${zip.length}:${Date.now()}` });
+-    const warn = def.warnings.length ? ` (${def.warnings.length} warning${def.warnings.length > 1 ? 's' : ''})` : '';
+-    return { ok: true, label: key, message: `${existing ? 'Updated' : 'Installed'} "${def.name}" ${def.version}${warn}` };
+-}
+-
+-const nestedReader = (name: string, bytes: Uint8Array) => readArchive(new File([bytes as BlobPart], name));
+-
+-interface Outcome { results: InstallResult[]; notes: string[]; pack?: string }
+-const notes: string[] = [];
+-
+-async function installEntries(label: string, entries: Record<string, Uint8Array>): Promise<Outcome> {
+-    say(`Reading ${label}…`);
+-    const plan = await planInstall(label, entries, nestedReader);
+-    const skipped = plan.skipped.map(s => `${s.name}: ${s.reason}`);
+-    if (plan.kind === 'none') {
+-        return { results: [{ ok: false, label, message: `${label}: no mod found. A mod needs a mod.json (at its root, in one folder, or inside a "mods" folder of a pack).` }], notes: skipped };
+-    }
+-    if (plan.support) await putSupport('imagediff2', treeToZip(memTree(plan.support))).catch(() => {});
+-    const results: InstallResult[] = [];
+-    for (const [i, item] of plan.items.entries()) {
+-        if (plan.items.length > 1) say(`Installing ${i + 1}/${plan.items.length}: ${item.label}`);
+-        results.push(await installMod(item.label, treeToZip(treeFromEntries(item.entries))));
+-    }
+-    return { results, notes: skipped, pack: plan.kind === 'pack' ? label : undefined };
+-}
+-
+-const labelOf = (name: string) => name.replace(/\.(zip|7z|rar|tar|tgz|tar\.gz|tar\.bz2|tbz2|tar\.xz|txz|gz|bz2|xz|mod|omm)$/i, '');
+-
+-async function installFiles(files: File[]) {
+-    const out: Outcome[] = [];
+-    for (const f of files) {
+-        try {
+-            const entries = await readArchive(f, { onProgress: m => say(m), askPassword: () => prompt(`${f.name} is password protected. Password:`) });
+-            out.push(await installEntries(labelOf(f.name), entries));
+-        } catch (e) {
+-            out.push({ results: [{ ok: false, label: f.name, message: e instanceof ArchiveError ? e.message : `${f.name}: ${(e as Error).message}` }], notes: [] });
+-        }
+-    }
+-    finish(out);
+-}
+-
+-async function installFolder(name: string, entries: Record<string, Uint8Array>) {
+-    try { finish([await installEntries(name, entries)]); }
+-    catch (e) { finish([{ results: [{ ok: false, label: name, message: `${name}: ${(e as Error).message}` }], notes: [] }]); }
+-}
+-
+-function finish(outcomes: Outcome[]) {
+-    if (!outcomes.length) return;
+-    const results = outcomes.flatMap(o => o.results);
+-    for (const r of results) (r.ok ? console.log : console.warn)(`[mods] ${r.message}`);
+-    const bad = results.filter(r => !r.ok), good = results.filter(r => r.ok);
+-    failures.splice(0, failures.length, ...bad.map(b => b.message));
+-    notes.splice(0, notes.length, ...outcomes.flatMap(o => o.notes));
+-    const pack = outcomes.find(o => o.pack)?.pack;
+-    if (good.length) {
+-        const summary = good.length > 3
+-            ? `Installed ${good.length} mod${good.length === 1 ? '' : 's'}${pack ? ` from ${pack}` : ''}${bad.length ? `, ${bad.length} failed` : ''}${notes.length ? `, ${notes.length} skipped` : ''}.`
+-            : `${bad.length ? `${good.length} installed, ${bad.length} failed. ` : ''}${good.map(r => r.message).join('; ')}`;
+-        say(summary,
+-            ['Try in a new profile', () => void tryInNewProfile(good.map(r => r.label), pack)],
+-            ['Add to this profile', () => void enableHere(good.map(r => r.label))],
+-            ['Not now', () => toast.classList.remove('show')]);
+-    } else say(bad.map(r => r.message).join('\n'));
+-    if (panel.classList.contains('open') || bad.length || notes.length) toggle(true);
+-    void render();
+-}
+-
+-async function readEntry(entry: FileSystemEntry, prefix: string, out: Record<string, Uint8Array>): Promise<void> {
+-    if (entry.isFile) {
+-        const file = await new Promise<File>((res, rej) => (entry as FileSystemFileEntry).file(res, rej));
+-        out[prefix + entry.name] = new Uint8Array(await file.arrayBuffer());
+-    } else if (entry.isDirectory) {
+-        const reader = (entry as FileSystemDirectoryEntry).createReader();
+-        for (;;) {
+-            const batch = await new Promise<FileSystemEntry[]>((res, rej) => reader.readEntries(res, rej));
+-            if (!batch.length) break;
+-            for (const c of batch) await readEntry(c, prefix + entry.name + '/', out);
+-        }
+-    }
+-}
+-
+-function installDragDrop() {
+-    let depth = 0;
+-    const hasFiles = (e: DragEvent) => [...(e.dataTransfer?.types ?? [])].includes('Files');
+-    window.addEventListener('dragenter', e => { if (hasFiles(e)) { depth++; overlay.classList.add('show'); } });
+-    window.addEventListener('dragleave', e => { if (hasFiles(e) && --depth <= 0) { depth = 0; overlay.classList.remove('show'); } });
+-    window.addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
+-    window.addEventListener('drop', async e => {
+-        if (!hasFiles(e)) return;
+-        e.preventDefault(); depth = 0; overlay.classList.remove('show');
+-        const items = [...(e.dataTransfer?.items ?? [])];
+-        const entries = items.map(i => i.webkitGetAsEntry?.()).filter((x): x is FileSystemEntry => !!x);
+-        const files: File[] = [];
+-        for (const entry of entries) {
+-            if (entry.isDirectory) {
+-                const all: Record<string, Uint8Array> = {};
+-                await readEntry(entry, '', all);
+-                const root = entry.name + '/';
+-                const flat = Object.fromEntries(Object.entries(all).map(([k, v]) => [k.startsWith(root) ? k.slice(root.length) : k, v]));
+-                await installFolder(entry.name, flat);
+-            } else {
+-                const f = items.find(i => i.webkitGetAsEntry?.() === entry)?.getAsFile();
+-                if (f) files.push(f);
+-            }
+-        }
+-        if (files.length) await installFiles(files);
+-    });
+-}
+-
+-async function fromFolderInput(input: HTMLInputElement) {
+-    const files = [...(input.files ?? [])];
+-    if (!files.length) return;
+-    const root = (files[0] as any).webkitRelativePath.split('/')[0] as string;
+-    const all: Record<string, Uint8Array> = {};
+-    for (const f of files) all[(f as any).webkitRelativePath.slice(root.length + 1)] = new Uint8Array(await f.arrayBuffer());
+-    await installFolder(root, all);
+-}
+-
+-const reloadWithoutProfileParam = () => { const u = new URL(location.href); u.searchParams.delete('profile'); location.replace(u); };
+-
+-async function switchTo(id: string) {
+-    if (profile && id !== profile.id) await makeBackup(profile, 'before switching profile');
+-    await setActiveProfile(id);
+-    reloadWithoutProfileParam();
+-}
+-
+-async function tryInNewProfile(keys: string[], packName?: string) {
+-    const names = packName ?? keys.map(k => records.find(r => r.key === k)?.label ?? k).join(', ');
+-    const name = prompt('Name for the new profile (your current saves are not touched):', names.slice(0, 40));
+-    if (name === null) return;
+-    const copy = confirm('Copy your current saves into the new profile, so you can continue where you left off?\n\nOK = copy current saves\nCancel = start with a fresh save');
+-    const p = await createProfile(name, { enabled: keys, copySavesFrom: copy ? profile?.id : undefined });
+-    await switchTo(p.id);
+-}
+-
+-async function enableHere(keys: string[]) {
+-    if (!profile) return;
+-    if (profile.id === DEFAULT_PROFILE && !confirm('This is your Original game profile. Mods here change how your existing saves behave, and a modded save may not load without them.\n\nA backup is taken first. Continue?')) return;
+-    await makeBackup(profile, 'before adding mods');
+-    profile.enabled = [...new Set([...profile.enabled, ...keys])];
+-    await saveProfile(profile);
+-    markDirty();
+-}
+-
+-const fmtTime = (t: number) => new Date(t).toLocaleString();
+-const slug = (s: string) => s.replace(/\W+/g, '_');
+-function download(name: string, bytes: Uint8Array) {
+-    const a = el('a', { href: URL.createObjectURL(new Blob([bytes as BlobPart], { type: 'application/zip' })), download: name });
+-    document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+-}
+-
+-async function render() {
+-    const [profiles, backups] = await Promise.all([listProfiles().catch(() => [] as Profile[]), listBackups().catch(() => [] as Backup[])]);
+-    const kids: (Node | string)[] = [];
+-
+-    if (profile) {
+-        const select = el('select', { onchange: () => void switchTo(select.value) },
+-            ...profiles.map(p => el('option', { value: p.id, selected: p.id === profile!.id, textContent: `${p.name}${p.id === DEFAULT_PROFILE ? ' (your existing saves)' : ''} · ${p.enabled.length} mod${p.enabled.length === 1 ? '' : 's'}${p.devAuto ? ' + dev folder' : ''}` })));
+-        const box = el('div', { class: 'omm-box' }, el('div', { class: 'omm-meta' }, 'Profile'), select,
+-            el('div', { class: 'omm-btns' },
+-                el('button', { textContent: 'New…', onclick: async () => {
+-                    const name = prompt('New profile name:'); if (name === null) return;
+-                    const copy = confirm("Copy this profile's saves and mods into it?\n\nOK = copy\nCancel = start fresh");
+-                    const p = await createProfile(name, { copySavesFrom: copy ? profile!.id : undefined, enabled: copy ? [...profile!.enabled] : [] });
+-                    await switchTo(p.id);
+-                } }),
+-                el('button', { textContent: 'Rename', onclick: async () => { const n = prompt('Rename profile:', profile!.name); if (n?.trim()) { profile!.name = n.trim(); await saveProfile(profile!); refreshTab(); void render(); } } }),
+-                ...(profile.id !== DEFAULT_PROFILE ? [el('button', { textContent: 'Delete', onclick: async () => {
+-                    if (!confirm(`Delete profile "${profile!.name}" and its saves?\n\nA backup of its saves is kept under Save backups.`)) return;
+-                    const id = profile!.id;
+-                    await setActiveProfile(DEFAULT_PROFILE); await deleteProfile(id); reloadWithoutProfileParam();
+-                } })] : [])),
+-            el('div', { class: 'omm-note' }, profile.id === DEFAULT_PROFILE
+-                ? 'These are your original saves. To try a mod without any risk to them, install it and choose "Try in a new profile".'
+-                : 'This profile has its own saves, separate from every other profile. Switching never overwrites anything; the profile you leave is backed up first.'));
+-        if (records.some(r => r.origin === 'server')) {
+-            const cb = el('input', { type: 'checkbox', checked: profile.devAuto, onchange: async () => { profile!.devAuto = cb.checked; await saveProfile(profile!); markDirty(); } });
+-            box.append(el('label', { class: 'omm-note', style: 'display:block' }, cb, ' Load every mod from the dev ./mods folder automatically'));
+-        }
+-        kids.push(box);
+-    }
+-
+-    const input = el('input', { type: 'file', accept: ARCHIVE_ACCEPT, multiple: true, style: 'display:none', onchange: () => { void installFiles([...(input.files ?? [])]); } });
+-    const folder = el('input', { type: 'file', multiple: true, style: 'display:none', onchange: () => { void fromFolderInput(folder); } });
+-    folder.setAttribute('webkitdirectory', '');
+-    kids.push(el('div', { class: 'omm-drop' }, 'Drag a mod (.zip, .7z, .rar, .tar.gz or a folder) onto the game, or ',
+-        el('button', { textContent: 'choose a file…', onclick: () => input.click() }), ' ',
+-        el('button', { textContent: 'choose a folder…', onclick: () => folder.click() }), input, folder));
+-
+-    if (SAFE_MODE) kids.push(el('div', { class: 'omm-msg warn' }, 'Safe mode: mods are not loaded for this session. ', el('a', { href: location.pathname, style: 'color:#fff', textContent: 'Start normally' })));
+-    for (const f of failures) kids.push(el('div', { class: 'omm-msg error' }, f));
+-    for (const n of notes) kids.push(el('div', { class: 'omm-meta', style: 'margin:4px 0' }, `Skipped ${n}`));
+-
+-    kids.push(el('div', { class: 'omm-h' }, 'Mod library'));
+-    if (records.length > 1 && profile) {
+-        const setAll = async (on: boolean) => {
+-            if (on && profile!.id === DEFAULT_PROFILE && !confirm('This is your Original game profile. Enabling mods here changes how your existing saves behave. A new profile is safer.\n\nEnable all anyway? (A backup is taken first.)')) return;
+-            if (on) await makeBackup(profile!, 'before enabling mods');
+-            profile!.enabled = on ? records.filter(r => r.origin === 'browser').map(r => r.key) : [];
+-            await saveProfile(profile!); markDirty();
+-        };
+-        const enabledCount = records.filter(r => profile!.enabled.includes(r.key) || (profile!.devAuto && r.origin === 'server')).length;
+-        kids.push(el('div', { class: 'omm-btns', style: 'margin:0 0 8px;align-items:center' }, el('span', { class: 'omm-meta' }, `${enabledCount} of ${records.length} enabled in this profile`),
+-            el('button', { textContent: 'Enable all', onclick: () => void setAll(true) }), el('button', { textContent: 'Disable all', onclick: () => void setAll(false) })));
+-    }
+-    if (!records.length) kids.push(el('div', { class: 'omm-meta' }, 'No mods installed.'));
+-    const loaded = new Map(engine.mods.map(m => [m.origin, m]));
+-    for (const rec of records) {
+-        const m = loaded.get(rec.key);
+-        const auto = !!profile?.devAuto && rec.origin === 'server';
+-        const on = !!profile && (profile.enabled.includes(rec.key) || auto);
+-        const bad = !!m && m.errors.length > 0;
+-        const toggleBtn = el('button', { textContent: on ? 'Disable' : 'Enable', disabled: auto, onclick: async () => {
+-            if (!profile) return;
+-            if (!on && profile.id === DEFAULT_PROFILE && !confirm('This is your Original game profile. Enabling a mod here changes how your existing saves behave. A new profile is safer.\n\nEnable anyway? (A backup is taken first.)')) return;
+-            if (!on) await makeBackup(profile, 'before enabling a mod');
+-            profile.enabled = on ? profile.enabled.filter(k => k !== rec.key) : [...profile.enabled, rec.key];
+-            await saveProfile(profile); markDirty();
+-        } });
+-        const row = el('div', { class: 'omm-row' },
+-            el('div', { class: 'grow' }, el('div', { class: 'omm-name' }, m?.name ?? rec.label), el('div', { class: 'omm-meta' },
+-                m ? `${m.id} · v${m.version}${m.author ? ' · ' + m.author : ''} · ${m.format === 'oneloader' ? 'OneLoader mod' : 'native'}${rec.origin === 'server' ? ' · dev folder' : ''}` : `${rec.label} (not enabled in this profile)`)),
+-            ...(bad ? [] : [toggleBtn]),
+-            ...(rec.origin === 'browser' ? [el('button', { textContent: 'Delete', title: 'Remove from the library (all profiles)', onclick: async () => {
+-                if (!confirm(`Delete "${rec.label}" from the library? Every profile using it loses it. Saves are not touched.`)) return;
+-                await removeMod(rec.key); records.splice(records.indexOf(rec), 1); if (profile) profile.enabled = profile.enabled.filter(k => k !== rec.key); markDirty();
+-            } })] : []));
+-        const card = el('div', { class: 'omm-mod' + (on ? '' : ' off') + (bad ? ' bad' : '') }, row);
+-        if (m?.description) card.append(el('div', { class: 'omm-meta', style: 'margin-top:4px' }, m.description));
+-        for (const x of m?.errors ?? []) card.append(el('div', { class: 'omm-msg error' }, x));
+-        for (const x of m?.warnings ?? []) card.append(el('div', { class: 'omm-msg warn' }, x));
+-        kids.push(card);
+-    }
+-
+-    const runtime = errors.filter(e => !engine.mods.some(m => m.errors.includes(e.message) || m.warnings.includes(e.message)));
+-    if (runtime.length) {
+-        kids.push(el('div', { class: 'omm-h' }, 'Errors & warnings (newest first)'));
+-        for (const e of [...runtime].reverse().slice(0, 40)) {
+-            kids.push(el('div', { class: `omm-msg ${e.level}` }, `[${e.mod}]${e.count > 1 ? ` ×${e.count}` : ''} ${e.message}${e.stack ? '\n' + e.stack.split('\n').slice(1, 4).join('\n') : ''}`));
+-        }
+-        kids.push(el('button', { textContent: 'Clear', onclick: () => { errors.length = 0; refreshTab(); void render(); } }));
+-    }
+-
+-    kids.push(el('div', { class: 'omm-h' }, 'Save backups'));
+-    const imp = el('input', { type: 'file', accept: '.zip', style: 'display:none', onchange: async () => {
+-        const f = imp.files?.[0]; if (!f || !profile) return;
+-        if (!confirm(`Replace the saves of "${profile.name}" with the contents of ${f.name}? The current saves are backed up first.`)) return;
+-        const n = await restoreInto(profile, new Uint8Array(await f.arrayBuffer()));
+-        say(`Restored ${n} file(s).`, ['Reload', () => location.reload()]);
+-    } });
+-    kids.push(el('div', { class: 'omm-btns', style: 'margin:0 0 8px' },
+-        el('button', { textContent: 'Back up now', onclick: async () => {
+-            if (!profile) return;
+-            const b = await makeBackup(profile, 'manual');
+-            say(b ? `Backed up ${b.files} file(s).` : 'Nothing to back up yet: this profile has no save data.');
+-            void render();
+-        } }),
+-        el('button', { textContent: 'Download saves (.zip)', onclick: async () => { if (profile) download(`omori-saves-${slug(profile.name)}.zip`, await exportSaves(profile)); } }),
+-        el('button', { textContent: 'Import saves…', onclick: () => imp.click() }), imp));
+-    if (!backups.length) kids.push(el('div', { class: 'omm-meta' }, 'No backups yet. They are made automatically before you switch or delete a profile, or change mods in the original one.'));
+-    for (const b of backups.slice(0, 12)) {
+-        const target = profiles.find(p => p.id === b.profile);
+-        kids.push(el('div', { class: 'omm-mod' }, el('div', { class: 'omm-row' },
+-            el('div', { class: 'grow' }, el('div', { class: 'omm-name' }, b.profileName), el('div', { class: 'omm-meta' }, `${fmtTime(b.time)} · ${b.reason} · ${b.files} file(s)`)),
+-            el('button', { textContent: 'Restore', title: target ? `Into "${target.name}"` : 'Into the current profile', onclick: async () => {
+-                const dest = target ?? profile!;
+-                if (!confirm(`Restore this backup into "${dest.name}"? Its current saves are backed up first.`)) return;
+-                await restoreInto(dest, b.zip);
+-                if (dest.id === profile?.id) location.reload(); else { say(`Restored into "${dest.name}".`); void render(); }
+-            } }),
+-            el('button', { textContent: '↓', title: 'Download', onclick: () => download(`omori-backup-${slug(b.profileName)}-${b.time}.zip`, b.zip) }),
+-            el('button', { textContent: '✕', title: 'Delete backup', onclick: async () => { await deleteBackup(b.id); void render(); } }))));
+-    }
+-
+-    kids.push(el('div', { class: 'omm-h' }, 'Tips'), el('div', { class: 'omm-meta' }, 'Add ?mods=0 to the address to start with no mods at all. ?profile=<id> opens a specific profile. ?hot=1 reloads automatically when the dev mods folder changes.'));
+-    body.replaceChildren(...kids);
+-}
+diff --git a/src/client/settings/builtin.ts b/src/client/settings/builtin.ts
+index 9e1d08c..c1cc7d6 100644
+--- a/src/client/settings/builtin.ts
++++ b/src/client/settings/builtin.ts
+@@ -25,7 +25,6 @@ export interface Actions {
+     importSettings(): void;
+     resetAll(): void;
+     copyDiagnostics(): void;
+-    openMods(): void;
+     loadGame(): void;
+     toTitle(): void;
+     reduceMotion(): void;
+@@ -115,7 +114,5 @@ export function registerBuiltin(a: Actions) {
+           control: { type: 'action', button: 'Apply', run: a.reduceMotion } },
+ 
+-        { id: 'mods', tab: 'system', group: 'Mods & saves', label: 'Mods, profiles & save backups', help: 'Install mods, switch profiles (each has its own saves) and restore backups.', keywords: 'profile backup',
+-          control: { type: 'action', button: 'Open (F8)', run: a.openMods } },
+         { id: 'loadGame', tab: 'system', group: 'Game', label: 'Load game', visible: inGame, control: { type: 'action', button: 'Load…', run: a.loadGame } },
+         { id: 'toTitle', tab: 'system', group: 'Game', label: 'Return to title screen', help: 'Unsaved progress is lost.', visible: inGame, control: { type: 'action', button: 'Return to title', danger: true, run: a.toTitle } },
+         { id: 'export', tab: 'system', group: 'Settings', label: 'Export settings', help: 'Save all settings, volumes and key bindings to a file to back them up or move them to another browser.',
+@@ -124,7 +121,7 @@ export function registerBuiltin(a: Actions) {
+         { id: 'import', tab: 'system', group: 'Settings', label: 'Import settings', control: { type: 'action', button: 'Import…', run: a.importSettings } },
+         { id: 'resetAll', tab: 'system', group: 'Settings', label: 'Reset all settings', help: 'Restore every setting and key binding to its default. Saves are not touched.',
+           control: { type: 'action', button: 'Reset all', danger: true, run: a.resetAll } },
+-        { id: 'diagnostics', tab: 'system', group: 'Support', label: 'Copy diagnostics', help: 'Copies version, graphics, mods and settings to the clipboard, useful when reporting a problem.', keywords: 'bug report debug info',
++        { id: 'diagnostics', tab: 'system', group: 'Support', label: 'Copy diagnostics', help: 'Copies version, graphics and settings to the clipboard, useful when reporting a problem.', keywords: 'bug report debug info',
+           control: { type: 'action', button: 'Copy', run: a.copyDiagnostics } },
+     ];
+     S.forEach(register);
+diff --git a/src/client/settings/index.ts b/src/client/settings/index.ts
+index 42d3445..c7835f1 100644
+--- a/src/client/settings/index.ts
++++ b/src/client/settings/index.ts
+@@ -1,4 +1,3 @@
+-import { openModManager } from '../mods/ui.ts';
+ import { registerBuiltin } from './builtin.ts';
+ import * as F from './features.ts';
+ import { closeSettings, isOpen, openSettings, settingsStatus } from './panel.ts';
+@@ -20,6 +19,6 @@ export { openSettings, closeSettings, isOpen };
+ export function installSettings() {
+     const CM = g.ConfigManager;
+ 
+     const makeData = CM.makeData, applyData = CM.applyData;
+     CM.makeData = function (this: any) { const c = makeData.call(this); c.omoriWeb = exportBag(); return c; };
+     CM.applyData = function (this: any, config: any) { applyData.call(this, config); importBag(config?.omoriWeb); };
+@@ -62,7 +61,6 @@ export function installSettings() {
+             const text = diagnostics();
+             (navigator.clipboard?.writeText(text) ?? Promise.reject()).then(() => settingsStatus('Diagnostics copied'), () => { download('omori-diagnostics.txt', text, 'text/plain'); settingsStatus('Clipboard blocked: saved as a file'); });
+         },
+-        openMods() { closeSettings(); openModManager(); },
+         loadGame() {
+             closeSettings(); CM.save();
+             g.SceneManager.push(g.Scene_OmoriFile); g.SceneManager._stack.pop(); g.SceneManager._nextScene.setup(false, true);
+@@ -105,7 +103,6 @@ function diagnostics(): string {
+         const ext = gl?.getExtension('WEBGL_debug_renderer_info');
+         if (gl && ext) gpu = String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL));
+     } catch {  }
+-    const mods = (g.OmoriMod?.mods ?? []).map((m: any) => `${m.id}@${m.version}${m.enabled ? '' : ' (off)'}`).join(', ') || 'none';
+     return [
+         `OpenOMORI diagnostics (${new Date().toISOString()})`,
+         `page: ${location.href}`,
+@@ -113,7 +110,6 @@ function diagnostics(): string {
+         `gpu: ${gpu}`,
+         `canvas: ${G?._width}x${G?._height} logical, ${G?._res}x resolution, scale ${G?._realScale?.toFixed?.(2)}, window ${innerWidth}x${innerHeight} @${devicePixelRatio}x`,
+         `scene: ${g.SceneManager?._scene?.constructor?.name}`,
+-        `mods: ${mods}`,
+         `settings: ${JSON.stringify({ ...CM.makeData(), keyboardInputMap: undefined, gamepadInputMap: undefined })}`,
+     ].join('\n');
+ }
+diff --git a/src/client/settings/panel.ts b/src/client/settings/panel.ts
+index f27fbad..9a0da72 100644
+--- a/src/client/settings/panel.ts
++++ b/src/client/settings/panel.ts
+@@ -141,12 +141,10 @@ function renderList() {
+     const list = visibleSettings().filter(s => (query ? matches(s) : s.tab === tab));
+     lastVisible = visibleKey();
+     const kids: Node[] = [];
+-    if (!list.length) kids.push(h('div', { class: 'empty' }, query ? `Nothing matches "${query}".` : tab === 'mods' ? 'No installed mod has added settings.' : 'Nothing here.'));
++    if (!list.length) kids.push(h('div', { class: 'empty' }, query ? `Nothing matches "${query}".` : 'Nothing here.'));
+     let group: string | undefined = '\0';
+-    const mods = tab === 'mods' && !query;
+-    if (mods) kids.push(h('div', { class: 'help', style: 'margin:14px 0 0' }, 'Settings added by your installed mods appear here.'));
+     for (const s of list) {
+-        const gname = query ? TABS.find(t => t.id === s.tab)!.label + (s.group ? ` › ${s.group}` : '') : mods ? (s.owner ?? s.group) : s.group;
++        const gname = query ? TABS.find(t => t.id === s.tab)!.label + (s.group ? ` › ${s.group}` : '') : s.group;
+         if (gname !== group) { group = gname; if (gname) kids.push(h('h2', {}, gname)); }
+         kids.push(s.control.type === 'keys' ? keysBlock() : row(s));
+     }
+@@ -220,7 +218,7 @@ const keyName = (code: number) =>
+     KEY_NAMES[code] ?? (code >= 48 && code <= 57 ? String(code - 48) : code >= 65 && code <= 90 ? String.fromCharCode(code) : code >= 96 && code <= 105 ? `Num ${code - 96}` : code >= 112 && code <= 123 ? `F${code - 111}` : `Key ${code}`);
+ const PAD_NAMES = ['A', 'B', 'X', 'Y', 'LB', 'RB', 'LT', 'RT', 'Back', 'Start', 'L3', 'R3', '↑', '↓', '←', '→', 'Home'];
+ const padName = (b: number) => PAD_NAMES[b] ?? `Button ${b}`;
+-const RESERVED_KEYS = new Set([116, 118, 119, 120, 121]);
++const RESERVED_KEYS = new Set([116, 118, 119, 120, 121]);
+ 
+ function keysBlock(): HTMLElement {
+     const box = h('div', { class: 'keys' });
+diff --git a/src/client/settings/registry.ts b/src/client/settings/registry.ts
+index 7133b5a..2631ff8 100644
+--- a/src/client/settings/registry.ts
++++ b/src/client/settings/registry.ts
+@@ -1,0 +1,0 @@
+@@ -6,5 +6,5 @@
+ 
+-export type TabId = 'general' | 'display' | 'audio' | 'controls' | 'accessibility' | 'mods' | 'system';
++export type TabId = 'general' | 'display' | 'audio' | 'controls' | 'accessibility' | 'system';
+ 
+ export const TABS: { id: TabId; label: string }[] = [
+     { id: 'general', label: 'Gameplay' },
+@@ -14,7 +14,6 @@ export const TABS: { id: TabId; label: string }[] = [
+     { id: 'audio', label: 'Audio' },
+     { id: 'controls', label: 'Controls' },
+     { id: 'accessibility', label: 'Accessibility' },
+-    { id: 'mods', label: 'Mods' },
+     { id: 'system', label: 'System' },
+ ];
+ 
+diff --git a/src/client/shim/fs.ts b/src/client/shim/fs.ts
+index 7edead2..3ae199c 100644
+--- a/src/client/shim/fs.ts
++++ b/src/client/shim/fs.ts
+@@ -12,7 +12,12 @@ const MAX_ENTRY_BYTES = 8 * 1024 * 1024;
+ const enoent = (p: string, op: string): NodeJS.ErrnoException =>
+     Object.assign(new Error(`ENOENT: no such file or directory, ${op} '${p}'`), { code: 'ENOENT', errno: -2, path: p });
+ 
+-export const keyOf = (p: string): string => path.normalize('/' + String(p)).replace(/^\/+|\/+$/g, '');
++const plainKey = (p: string): string => path.normalize('/' + String(p)).replace(/^\/+|\/+$/g, '');
++export const keyOf = (p: string): string => {
++    const k = plainKey(p);
++    const i = web?.lookup.find(k);
++    return i === undefined ? k : web!.files[i]![0];
++};
+ const urlOf = (k: string): string => '/' + k.split('/').map(encodeURIComponent).join('/');
+ const encodingOf = (o: Encoding): string | undefined => (typeof o === 'string' ? o : o?.encoding ?? undefined);
+ 
+@@ -35,22 +41,32 @@ class ByteCache {
+ }
+ const cache = new ByteCache();
+ 
+-export interface ModLayer {
+-    has(key: string): boolean;
+-    resolve(key: string, base: () => Uint8Array | null): Uint8Array | null;
+-    added(dir: string): string[];
+-}
+-let modLayer: ModLayer | null = null;
+-const modded = new Map<string, Uint8Array | null>();
+-export function setModLayer(layer: ModLayer | null) { modLayer = layer; modded.clear(); }
+-const withAdded = (names: string[] | null, dir: string): string[] | null => {
+-    const extra = modLayer?.added(dir) ?? [];
+-    return names || extra.length ? [...new Set([...(names ?? []), ...extra])] : null;
+-};
++const withAdded = (names: string[] | null, _dir: string): string[] | null => names;
+ const lsCache = new Map<string, string[] | null>();
+ const missing = new Set<string>();
+ 
++interface WebIndex { find(rel: string): number | undefined; list(dir: string): string[] | null }
++let web: { lookup: WebIndex; files: [string, number][] } | null = null;
++export function setWebIndex(lookup: WebIndex, files: [string, number][]) { web = { lookup, files }; }
++
++const BULK = /\.(png|jpe?g|gif|webp|ogg|m4a|mp3|wav|webm|mp4|ttf|otf|woff2?)$/i;
++export async function prefetchWebFiles(): Promise<void> {
++    if (!web) return;
++    let budget = MAX_CACHE_BYTES - 16 * 1024 * 1024;
++    const todo: string[] = [];
++    for (const [name, size] of web.files) {
++        if (BULK.test(name) || /^data\/Map\d+/i.test(name) || size > MAX_ENTRY_BYTES || cache.has(keyOf(name))) continue;
++        if (budget < size) continue;
++        budget -= size; todo.push(keyOf(name));
++    }
++    let next = 0;
++    await Promise.all(Array.from({ length: 8 }, async () => {
++        while (next < todo.length) { const k = todo[next++]!; const u = await fetchAsync(k); if (u) cache.set(k, u); }
++    }));
++}
++
+ function fetchSync(k: string): Uint8Array | null {
++    if (web && web.lookup.find(k) === undefined) return null;
+     const xhr = new XMLHttpRequest();
+     xhr.open('GET', urlOf(k), false);
+     xhr.overrideMimeType('text/plain; charset=x-user-defined');
+@@ -71,6 +90,7 @@ async function fetchAsync(k: string): Promise<Uint8Array | null> {
+ 
+ function listSync(k: string): string[] | null {
+     if (lsCache.has(k)) return lsCache.get(k)!;
++    if (web) { const res = withAdded(web.lookup.list(k), k); lsCache.set(k, res); return res; }
+     const xhr = new XMLHttpRequest();
+     xhr.open('GET', '/__ls?p=' + encodeURIComponent(k), false);
+     let res: string[] | null = null;
+@@ -97,6 +117,6 @@ const overlay = new Map<string, Uint8Array | null>(); // null = deleted
+ const overlayDirs = new Set<string>();
+ let idb: IDBDatabase | null = null;
+ 
+ export async function loadOverlay(dbName = 'omori-fs'): Promise<void> {
+     idb = await new Promise<IDBDatabase | null>(res => {
+         try {
+@@ -134,11 +154,6 @@ const bytesOf = (data: string | Uint8Array): Uint8Array =>
+ 
+ function lookup(k: string): Uint8Array | null | undefined {
+     if (overlay.has(k)) return overlay.get(k);
+-    if (modLayer?.has(k)) {
+-        if (!modded.has(k)) modded.set(k, modLayer.resolve(k, () => cache.get(k) ?? fetchSync(k)));
+-        const m = modded.get(k);
+-        if (m) return m;
+-    }
+     return cache.get(k);
+ }
+ 
+@@ -168,10 +183,11 @@ export const fs = {
+     existsSync(p: string): boolean {
+         const k = keyOf(p);
+         if (overlay.has(k)) return overlay.get(k) !== null;
+-        if (overlayDirs.has(k) || cache.has(k) || modLayer?.has(k)) return true;
++        if (overlayDirs.has(k) || cache.has(k)) return true;
+         for (const [ok, v] of overlay) if (v && ok.startsWith(k + '/')) return true;
+         if (missing.has(k)) return false;
+         if (listSync(k)) return true;
++        if (web) return web.lookup.find(k) !== undefined;
+         const xhr = new XMLHttpRequest();
+         xhr.open('HEAD', urlOf(k), false);
+         try { xhr.send(); } catch { return false; }
+@@ -183,9 +199,11 @@ export const fs = {
+         if (overlayDirs.has(k) || (!overlay.has(k) && listSync(k))) {
+             return { isDirectory: () => true, isFile: () => false, size: 0 };
+         }
+-        const u = lookup(k) ?? fetchSync(k);
+-        if (!u) throw enoent(p, 'stat');
+-        return { isDirectory: () => false, isFile: () => true, size: u.length };
++        const u = lookup(k) ?? (web ? undefined : fetchSync(k));
++        if (u) return { isDirectory: () => false, isFile: () => true, size: u.length };
++        const i = web?.lookup.find(k);
++        if (i === undefined) throw enoent(p, 'stat');
++        return { isDirectory: () => false, isFile: () => true, size: web!.files[i]![1] };
+     },
+     stat(p: string, cb: Cb<Stats>) {
+         setTimeout(() => { try { cb(null, fs.statSync(p)); } catch (e) { cb(e as NodeJS.ErrnoException); } }, 0);
+diff --git a/src/client/shim/index.ts b/src/client/shim/index.ts
+index 409b197..e6bf032 100644
+--- a/src/client/shim/index.ts
++++ b/src/client/shim/index.ts
+@@ -4,7 +4,6 @@ import path from 'path-browserify';
+ import yaml from 'js-yaml';
+ import { crypto } from './crypto.ts';
+ import { fs, loadOverlay } from './fs.ts';
+-import { getActiveProfile } from '../mods/store.ts';
+ import { greenworks, nw, processShim, setGameKey } from './nw.ts';
+ 
+ const g = globalThis as Record<string, any>;
+@@ -34,7 +33,6 @@ export const shimReady: Promise<void> = (async () => {
+     const res = await fetch('/__config');
+     if (!res.ok) throw new Error('Could not read the game key from your OMORI install (see README: OMORI_DIR).');
+     setGameKey((await res.json()).key);
+-    const profile = await getActiveProfile().catch(() => null);
+-    await loadOverlay(profile?.fsDb);
++    await loadOverlay('omori-fs');
+     if (!fs.existsSync('/appdata/OMORI/CUTSCENE.json')) fs.writeFileSync('/appdata/OMORI/CUTSCENE.json', '{}');
+ })();
+diff --git a/src/server.ts b/src/server.ts
+index 47b4598..47aed02 100644
+--- a/src/server.ts
++++ b/src/server.ts
+@@ -1,7 +1,6 @@
+-import { appendFileSync, readdirSync, statSync, watch, writeFileSync } from 'node:fs';
+-import { join, resolve, sep } from 'node:path';
+-import { discoverMods } from './mods/vfs-node.ts';
+-import { isOsJunk, treeToZip } from './mods/vfs.ts';
++import { readdirSync, statSync } from 'node:fs';
++import { join, sep } from 'node:path';
++import { isOsJunk } from './mods/vfs.ts';
+ import { ROOT, WWW, ensureGameDir, readGameKey } from './gamedir.ts';
+ import { storyIndex } from './mods/mapkit-node.ts';
+ 
+@@ -11,15 +10,5 @@ if (!ensureGameDir()) process.exit(1);   // asks for your OMORI folder the first
+ 
+ const PORT = Number(process.argv[2] ?? process.env.PORT ?? 8080);
+ 
+-const MODS_DIR = resolve(process.env.OMORI_MODS ?? join(ROOT, 'mods'));
+-const LOG_FILE = join(ROOT, 'latest.log');
+-try { writeFileSync(LOG_FILE, ''); } catch {  }
+-const log = (line: string) => { console.log(line); try { appendFileSync(LOG_FILE, `${line}\n`); } catch {  } };
+-let modsVersion = 1;
+-let bump: ReturnType<typeof setTimeout> | undefined;
+-try {
+-    watch(MODS_DIR, { recursive: true }, (_ev, name) => { if (name && isOsJunk(String(name).replace(/\\/g, '/'))) return; clearTimeout(bump); bump = setTimeout(() => modsVersion++, 250); });
+-} catch (e) { console.warn(`not watching ${MODS_DIR}: ${(e as Error).message}`); }
+-
+ const TYPES: Record<string, string> = { yaml: 'text/plain', yml: 'text/plain', md: 'text/plain', ogg: 'audio/ogg', webm: 'video/webm' };
+ 
+@@ -95,23 +81,5 @@ const server = Bun.serve({
+         if (rel === '/__story.json') { try { return Response.json(storyIndex()); } catch (e) { return new Response(String(e), { status: 500 }); } }
+ 
+-        if (rel === '/__mods/version') return Response.json({ version: modsVersion });
+-        if (rel === '/__mods/list') {
+-            const mods = discoverMods(MODS_DIR, (n, e) => log(`[error] cannot read mod "${n}": ${e.message}`));
+-            return Response.json({ version: modsVersion, mods: mods.map(m => ({ label: m.label, stamp: m.tree.stamp })) });
+-        }
+-        if (rel === '/__mods/pack') {
+-            const label = url.searchParams.get('name') ?? '';
+-            const mod = discoverMods(MODS_DIR, () => {}).find(m => m.label === label);
+-            return mod ? new Response(treeToZip(mod.tree) as BodyInit, { headers: { 'content-type': 'application/zip', 'cache-control': 'no-store' } }) : new Response('no such mod', { status: 404 });
+-        }
+-        if (rel === '/__mods/log' && req.method === 'POST') {
+-            return req.json().then((b: any) => {
+-                const level = b?.level === 'warn' ? 'warn' : b?.level === 'info' ? 'info' : 'error';
+-                log(`${new Date().toISOString()} [${level}] [${String(b?.mod ?? '(client)').slice(0, 64)}] ${String(b?.message ?? '').slice(0, 4000)}`);
+-                return new Response(null, { status: 204 });
+-            }, () => new Response('bad json', { status: 400 }));
+-        }
+-
+         const path = resolveInWww(rel);
+         if (!path || !statSync(path, { throwIfNoEntry: false })?.isFile()) return new Response('not found', { status: 404 });
+         return fileResponse(path, req);
+diff --git a/src/sw.ts b/src/sw.ts
+index ea4054e..c72801e 100644
+--- a/src/sw.ts
++++ b/src/sw.ts
+@@ -1,80 +1,19 @@
+-import { ModEngine } from './mods/engine.ts';
+-import { zipTreeFromBytes } from './mods/vfs.ts';
+-import { enabledKeys, getActiveProfile, getMeta, listMods, readGenerated } from './client/mods/store.ts';
++import { dropGame, gameFetch, isAppAsset, relPath, specialRoute } from './web/game-sw.ts';
+ 
+ const sw = self as any;
+ 
+-let engine: Promise<ModEngine> | null = null;
+-
+-function build(safe = false): Promise<ModEngine> {
+-    return (async () => {
+-        const e = new ModEngine();
+-        if (safe) return e;
+-        const recs = (await listMods()).sort((a, b) => a.key.localeCompare(b.key));
+-        const on = enabledKeys(await getActiveProfile(), recs);
+-        const hexKey = await getMeta<string>('assetKey');
+-        if (hexKey) e.assetKey = Uint8Array.from(hexKey.match(/../g) ?? [], h => parseInt(h, 16));
+-        e.load(recs.map(r => ({ label: r.label, tree: zipTreeFromBytes(r.zip, r.stamp), origin: r.key, disabled: !on.has(r.key) })));
+-        for (const [path, bytes] of Object.entries(await readGenerated())) e.setGenerated(path, bytes);
+-        return e;
+-    })();
+-}
+-const get = () => (engine ??= build());
+-
+ sw.addEventListener('install', () => void sw.skipWaiting());
+ sw.addEventListener('activate', (e: any) => e.waitUntil(sw.clients.claim()));
+ sw.addEventListener('message', (e: any) => {
+-    if (e.data?.type !== 'reload') return;
+-    engine = build(!!e.data.safe);
+-    e.waitUntil(engine.then(() => e.source?.postMessage({ type: 'reloaded' }), () => e.source?.postMessage({ type: 'reloaded', error: true })));
++    if (e.data?.type === 'game-reload') dropGame();
+ });
+ 
+-const MIME: Record<string, string> = {
+-    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', ogg: 'audio/ogg', m4a: 'audio/mp4', mp3: 'audio/mpeg', wav: 'audio/wav',
+-    webm: 'video/webm', mp4: 'video/mp4', ttf: 'font/ttf', otf: 'font/otf', woff: 'font/woff', woff2: 'font/woff2', js: 'text/javascript', json: 'application/json', css: 'text/css', html: 'text/html', txt: 'text/plain', yml: 'text/plain',
+-};
+-
+ sw.addEventListener('fetch', (event: any) => {
+     const req = event.request;
+-    if (req.method !== 'GET') return;
+     const url = new URL(req.url);
+-    if (url.origin !== location.origin || url.pathname.startsWith('/__')) return;
+-    event.respondWith(handle(req, url));
++    if (url.origin !== location.origin) return;
++    const rel = relPath(url);
++    if (rel.startsWith('__')) { event.respondWith(specialRoute(req, rel, url)); return; }
++    if ((req.method !== 'GET' && req.method !== 'HEAD') || isAppAsset(rel)) return;
++    event.respondWith(gameFetch(req));
+ });
+-
+-async function handle(req: Request, url: URL): Promise<Response> {
+-    let path: string;
+-    try { path = decodeURIComponent(url.pathname); } catch { path = url.pathname; }
+-    path = path.replace(/^\/+/, '');
+-    if (url.searchParams.has('__vanilla')) return fetch(req);
+-    try {
+-        const eng = await get();
+-        if (!eng.hasEdits(path) || eng.isEncrypted(path)) return fetch(req);
+-
+-        let base: Uint8Array | null = null;
+-        if (eng.needsBase(path)) {
+-            const r = await fetch(url.pathname, { cache: 'no-store' });
+-            if (r.ok) base = new Uint8Array(await r.arrayBuffer());
+-        }
+-        const bytes = eng.resolve(path, () => base);
+-        if (!bytes) return fetch(req);
+-        const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase();
+-        return ranged(req, bytes, MIME[ext] ?? 'application/octet-stream');
+-    } catch (e) {
+-        console.error('[omori-mods] service worker failed for', path, e);
+-        return fetch(req);
+-    }
+-}
+-
+-function ranged(req: Request, bytes: Uint8Array, type: string): Response {
+-    const headers = { 'content-type': type, 'accept-ranges': 'bytes', 'cache-control': 'no-store', 'x-omori-mod': '1' };
+-    const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.get('range') ?? '');
+-    if (m && (m[1] || m[2])) {
+-        const size = bytes.length;
+-        const start = m[1] ? Number(m[1]) : Math.max(0, size - Number(m[2]));
+-        const end = m[1] && m[2] ? Math.min(Number(m[2]), size - 1) : size - 1;
+-        if (start > end || start >= size) return new Response(null, { status: 416, headers: { 'content-range': `bytes */${size}` } });
+-        return new Response(bytes.slice(start, end + 1) as BodyInit, { status: 206, headers: { ...headers, 'content-range': `bytes ${start}-${end}/${size}`, 'content-length': String(end - start + 1) } });
+-    }
+-    return new Response(bytes as BodyInit, { headers: { ...headers, 'content-length': String(bytes.length) } });
+-}
+diff --git a/src/web/base.ts b/src/web/base.ts
+new file mode 100644
+index 0000000..c115dab
+--- /dev/null
++++ b/src/web/base.ts
+@@ -0,0 +1,14 @@
++
++export const BASE: string = typeof document === 'undefined' ? '/' : new URL('.', document.baseURI).pathname;
++
++if (typeof window !== 'undefined' && BASE !== '/') {
++    const rebase = (u: string) => (u.startsWith('/') && !u.startsWith('//') && !u.startsWith(BASE) ? BASE + u.slice(1) : u);
++
++    const realFetch = window.fetch.bind(window);
++    window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => realFetch(typeof input === 'string' ? rebase(input) : input, init)) as typeof fetch;
++
++    const realOpen = XMLHttpRequest.prototype.open;
++    XMLHttpRequest.prototype.open = function (this: XMLHttpRequest, method: string, url: string | URL, ...rest: unknown[]) {
++        return (realOpen as (...a: unknown[]) => void).call(this, method, typeof url === 'string' ? rebase(url) : url, ...rest);
++    } as typeof XMLHttpRequest.prototype.open;
++}
+diff --git a/src/web/diag.ts b/src/web/diag.ts
+new file mode 100644
+index 0000000..ecfe408
+--- /dev/null
++++ b/src/web/diag.ts
+@@ -0,0 +1,29 @@
++import { BASE } from './base.ts';
++
++export async function runDiagnostics(): Promise<string> {
++    const lines: string[] = [];
++    const add = (k: string, v: unknown) => lines.push(`${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
++    const safe = async <T>(f: () => Promise<T>): Promise<T | string> => { try { return await f(); } catch (e) { return 'threw ' + String(e); } };
++
++    add('page', location.href);
++    add('browser', navigator.userAgent);
++    add('service worker controls page', !!navigator.serviceWorker?.controller);
++    add('registration', await safe(async () => { const r = await navigator.serviceWorker.getRegistration(BASE); return r ? { scope: r.scope, active: !!r.active } : null; }));
++    add('storage estimate', await safe(async () => navigator.storage.estimate()));
++    add('storage persisted', await safe(async () => navigator.storage.persisted()));
++    add('page can read game storage', await safe(async () => {
++        const dir = await (await navigator.storage.getDirectory()).getDirectoryHandle('game');
++        return { firstFileBytes: (await (await dir.getFileHandle('0')).getFile()).size };
++    }));
++
++    for (const p of ['__diag', '__config', '__ls?p=data', 'js/rpg_core.js', 'data/System.KEL', '__failures']) {
++        add('GET ' + p, await safe(async () => {
++            const r = await fetch(BASE + p, { cache: 'no-store' });
++            if (p === '__config') return `${r.status} ${r.ok && 'key' in (await r.json()) ? 'key present' : 'no key'}`;
++            if (p === '__failures') return `${r.status} ${(await r.text())}`;
++            if (p.endsWith('.js') || p.endsWith('.KEL')) return `${r.status} ${r.ok ? (await r.arrayBuffer()).byteLength + ' bytes' : (await r.text()).slice(0, 200)}`;
++            return `${r.status} ${(await r.text()).slice(0, 300)}`;
++        }));
++    }
++    return lines.join('\n');
++}
+diff --git a/src/web/file-provider.ts b/src/web/file-provider.ts
+new file mode 100644
+index 0000000..82782a9
+--- /dev/null
++++ b/src/web/file-provider.ts
+@@ -0,0 +1,17 @@
++const chan = new BroadcastChannel('omori-game-files');
++let dir: Promise<FileSystemDirectoryHandle> | null = null;
++
++chan.onmessage = async (e: MessageEvent) => {
++    const m = e.data;
++    if (m?.type !== 'get') return;
++    try {
++        const d = await (dir ??= navigator.storage.getDirectory().then(r => r.getDirectoryHandle('game')));
++        const file = await (await d.getFileHandle(String(m.file))).getFile();
++        chan.postMessage({ type: 'file', id: m.id, file });
++    } catch (err) {
++        dir = null;
++        chan.postMessage({ type: 'file', id: m.id, file: null, error: String(err) });
++    }
++};
++
++(self as unknown as Worker).postMessage({ type: 'ready' });
+diff --git a/src/web/game-index.ts b/src/web/game-index.ts
+new file mode 100644
+index 0000000..76b6247
+--- /dev/null
++++ b/src/web/game-index.ts
+@@ -0,0 +1,32 @@
++
++export interface GameIndex {
++    version: 1;
++    key: string;
++    files: [string, number][];
++}
++
++export interface Lookup {
++    find(rel: string): number | undefined;
++    list(dir: string): string[] | null;
++}
++
++const norm = (p: string) => p.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').toLowerCase();
++
++export function buildLookup(files: [string, number][]): Lookup {
++    const byLower = new Map<string, number>();
++    const dirs = new Map<string, Map<string, string>>();
++    files.forEach(([path], i) => {
++        byLower.set(path.toLowerCase(), i);
++        const parts = path.split('/');
++        for (let d = 0; d < parts.length; d++) {
++            const parent = parts.slice(0, d).join('/').toLowerCase();
++            let m = dirs.get(parent);
++            if (!m) dirs.set(parent, (m = new Map()));
++            m.set(parts[d]!.toLowerCase(), parts[d]!);
++        }
++    });
++    return {
++        find: rel => byLower.get(norm(rel)),
++        list: dir => { const m = dirs.get(norm(dir)); return m ? [...m.values()] : null; },
++    };
++}
+diff --git a/src/web/game-sw.ts b/src/web/game-sw.ts
+new file mode 100644
+index 0000000..5796840
+--- /dev/null
++++ b/src/web/game-sw.ts
+@@ -0,0 +1,134 @@
++import { getMeta } from './idb.ts';
++import { buildLookup, type GameIndex, type Lookup } from './game-index.ts';
++
++const scope = () => new URL((self as any).registration.scope).pathname;
++
++export function relPath(url: URL): string {
++    let p: string;
++    try { p = decodeURIComponent(url.pathname); } catch { p = url.pathname; }
++    const base = scope();
++    return p.startsWith(base) ? p.slice(base.length) : p.replace(/^\/+/, '');
++}
++
++export const isAppAsset = (rel: string) =>
++    rel === '' || rel === 'index.html' || rel === 'app.js' || rel === 'app.js.map' || rel === 'sw.js' || rel === 'import-worker.js' || rel === 'file-provider.js' || rel.startsWith('vendor/');
++
++interface Loaded { key: string; lookup: Lookup; count: number }
++let loaded: Promise<Loaded | null> | null = null;
++let gameDir: Promise<FileSystemDirectoryHandle> | null = null;
++
++export function dropGame(): void { loaded = null; gameDir = null; }
++
++const load = () => {
++    if (loaded) return loaded;
++    const p = (async () => {
++        const g = await getMeta<GameIndex>('webGame');
++        return g?.key ? { key: g.key, lookup: buildLookup(g.files), count: g.files.length } : null;
++    })();
++    loaded = p;
++    p.then(v => { if (!v && loaded === p) loaded = null; }, () => { if (loaded === p) loaded = null; });
++    return p;
++};
++
++const failures = new Map<string, string>();
++function fail(rel: string, why: string): void {
++    failures.delete(rel);
++    failures.set(rel, why);
++    if (failures.size > 40) failures.delete(failures.keys().next().value!);
++}
++
++const MIME: Record<string, string> = {
++    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', ogg: 'audio/ogg', m4a: 'audio/mp4', mp3: 'audio/mpeg', wav: 'audio/wav',
++    webm: 'video/webm', mp4: 'video/mp4', ttf: 'font/ttf', otf: 'font/otf', woff: 'font/woff', woff2: 'font/woff2', js: 'text/javascript', json: 'application/json',
++    css: 'text/css', html: 'text/html', txt: 'text/plain', yml: 'text/plain', yaml: 'text/plain', md: 'text/plain',
++};
++
++const chan = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('omori-game-files');
++const pending = new Map<number, (m: { file: File | null; error?: string }) => void>();
++let nextId = 1;
++let directError: string | null = null;
++if (chan) chan.onmessage = e => { const m = e.data; if (m?.type === 'file') { pending.get(m.id)?.(m); pending.delete(m.id); } };
++
++const within = <T>(p: Promise<T>, ms: number, what: string): Promise<T> =>
++    new Promise<T>((resolve, reject) => { const t = setTimeout(() => reject(new Error(what + ' timed out')), ms); p.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); }); });
++
++async function direct(i: number): Promise<File> {
++    return within((async () => {
++        const dir = await (gameDir ??= navigator.storage.getDirectory().then(r => r.getDirectoryHandle('game')));
++        return (await dir.getFileHandle(String(i))).getFile();
++    })(), 3000, 'opening game storage');
++}
++const LIMIT = 6;
++let active = 0;
++const waiting: (() => void)[] = [];
++async function slot<T>(f: () => Promise<T>): Promise<T> {
++    if (active >= LIMIT) await new Promise<void>(res => waiting.push(res));
++    active++;
++    try { return await f(); } finally { active--; waiting.shift()?.(); }
++}
++async function viaProvider(i: number): Promise<File> {
++    let last: unknown;
++    for (let attempt = 0; attempt < 3; attempt++) {
++        try { return await slot(() => askProvider(i)); } catch (e) { last = e; }
++    }
++    throw last;
++}
++function askProvider(i: number): Promise<File> {
++    return new Promise((resolve, reject) => {
++        if (!chan) return reject(new Error('no BroadcastChannel'));
++        const id = nextId++;
++        const t = setTimeout(() => { pending.delete(id); reject(new Error('the page did not answer (file-provider worker not running?)')); }, 4000);
++        pending.set(id, m => { clearTimeout(t); m.file ? resolve(m.file) : reject(new Error(m.error ?? 'file not found in storage')); });
++        chan.postMessage({ type: 'get', id, file: i });
++    });
++}
++async function openFile(i: number): Promise<File> {
++    if (directError === null) {
++        try { return await direct(i); } catch (e) { gameDir = null; directError = String(e); }
++    }
++    try { return await viaProvider(i); } catch (e) { throw new Error(`direct: ${directError}; via page: ${String(e)}`); }
++}
++
++export async function gameFetch(req: Request): Promise<Response> {
++    const g = await load();
++    const rel = relPath(new URL(req.url));
++    if (!g) { fail(rel, 'no game imported yet'); return new Response('no game imported yet', { status: 404 }); }
++    const i = g.lookup.find(rel);
++    if (i === undefined) { fail(rel, 'not in the imported game (404)'); return new Response('not found', { status: 404 }); }
++    let file: File;
++    try { file = await openFile(i); } catch (e) { fail(rel, 'storage read failed: ' + String(e)); return new Response('game storage is not available: ' + String(e), { status: 500 }); }
++
++    const ext = rel.slice(rel.lastIndexOf('.') + 1).toLowerCase();
++    const headers: Record<string, string> = { 'content-type': MIME[ext] ?? 'application/octet-stream', 'accept-ranges': 'bytes', 'cache-control': 'no-cache' };
++    const size = file.size;
++    const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.get('range') ?? '');
++    if (m && (m[1] || m[2])) {
++        const start = m[1] ? Number(m[1]) : Math.max(0, size - Number(m[2]));
++        const end = m[1] && m[2] ? Math.min(Number(m[2]), size - 1) : size - 1;
++        if (start > end || start >= size) return new Response(null, { status: 416, headers: { 'content-range': `bytes */${size}` } });
++        return new Response(req.method === 'HEAD' ? null : file.slice(start, end + 1), { status: 206, headers: { ...headers, 'content-range': `bytes ${start}-${end}/${size}`, 'content-length': String(end - start + 1) } });
++    }
++    return new Response(req.method === 'HEAD' ? null : file, { headers: { ...headers, 'content-length': String(size) } });
++}
++
++export async function specialRoute(req: Request, rel: string, url: URL): Promise<Response> {
++    switch (rel) {
++        case '__config': {
++            const g = await load();
++            return g ? Response.json({ key: g.key }) : new Response('no game imported yet', { status: 404 });
++        }
++        case '__ls': {
++            const names = (await load())?.lookup.list(url.searchParams.get('p') ?? '');
++            return names ? Response.json(names) : new Response(null, { status: 404 });
++        }
++        case '__diag': {
++            const g = await load();
++            const out: Record<string, unknown> = { hasGame: !!g, files: g?.count };
++            try { out.workerReadsStorageItself = { firstFileBytes: (await direct(0)).size }; } catch (e) { out.workerReadsStorageItself = 'threw ' + String(e); }
++            try { out.viaFileProvider = { firstFileBytes: (await viaProvider(0)).size }; } catch (e) { out.viaFileProvider = 'threw ' + String(e); }
++            return Response.json(out);
++        }
++        case '__failures': return Response.json([...failures].map(([path, why]) => `${path}: ${why}`));
++        default: return new Response('not found', { status: 404 });
++    }
++}
+diff --git a/src/web/idb.ts b/src/web/idb.ts
+new file mode 100644
+index 0000000..ad32390
+--- /dev/null
++++ b/src/web/idb.ts
+@@ -0,0 +1,26 @@
++const DB = 'omori-mods';
++const DB_VERSION = 3;
++
++function open(): Promise<IDBDatabase> {
++    return new Promise((res, rej) => {
++        const r = indexedDB.open(DB, DB_VERSION);
++        r.onupgradeneeded = () => {
++            const db = r.result;
++            for (const [name, opts] of [['mods', { keyPath: 'key' }], ['profiles', { keyPath: 'id' }], ['backups', { keyPath: 'id' }], ['meta', undefined], ['gen', undefined], ['olidcache', undefined]] as const) {
++                if (!db.objectStoreNames.contains(name)) db.createObjectStore(name, opts);
++            }
++        };
++        r.onsuccess = () => res(r.result);
++        r.onerror = () => rej(r.error ?? new Error('cannot open the browser database (private browsing?)'));
++    });
++}
++
++const done = <T>(r: IDBRequest<T>) => new Promise<T>((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
++
++async function tx<T>(store: string, mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<T>): Promise<T> {
++    const db = await open();
++    try { return await done(fn(db.transaction(store, mode).objectStore(store))); } finally { db.close(); }
++}
++
++export const getMeta = <T>(key: string) => tx('meta', 'readonly', s => s.get(key)) as Promise<T | undefined>;
++export const setMeta = (key: string, value: unknown) => tx('meta', 'readwrite', s => s.put(value, key));
+diff --git a/src/web/import-worker.ts b/src/web/import-worker.ts
+new file mode 100644
+index 0000000..6b2925d
+--- /dev/null
++++ b/src/web/import-worker.ts
+@@ -0,0 +1,61 @@
++import { extractKey, findGameRoot, openEntry, readCentralDirectory, readEntry } from './zip.ts';
++
++const post = (m: unknown) => (self as unknown as Worker).postMessage(m);
++
++self.onmessage = async (e: MessageEvent<{ file: File }>) => {
++    try { await run(e.data.file); } catch (err) { post({ type: 'error', message: err instanceof Error ? err.message : String(err) }); }
++};
++
++function writeAll(h: any, data: Uint8Array, at: number): number {
++    let done = 0;
++    while (done < data.byteLength) {
++        const n = h.write(data.subarray(done), { at: at + done });
++        if (!n) throw new Error('The browser stopped accepting data (out of storage?).');
++        done += n;
++    }
++    return at + done;
++}
++
++async function run(file: File): Promise<void> {
++    const entries = await readCentralDirectory(file);
++    const found = findGameRoot(entries.map(x => x.name));
++    if (!found) throw new Error('This zip does not look like an OMORI folder: it has no www/js/rpg_core.js. Zip the folder that contains OMORI.exe and www.');
++
++    let key: string | null = null;
++    const bat = found.root === null ? undefined : entries.find(x => x.name.toLowerCase() === found.root + 'launch_omori.bat');
++    if (bat) key = extractKey(new TextDecoder().decode(await readEntry(file, bat)));
++
++    const files = entries.filter(x => !x.name.endsWith('/') && x.name.toLowerCase().startsWith(found.prefix));
++    const total = files.reduce((n, x) => n + x.usize, 0);
++    const est = await navigator.storage.estimate?.();
++    if (est?.quota && est.usage !== undefined && total > est.quota - est.usage) {
++        throw new Error(`Not enough free browser storage: the game needs ${(total / 2 ** 30).toFixed(1)} GB and about ${((est.quota - est.usage) / 2 ** 30).toFixed(1)} GB is available.`);
++    }
++
++    const root = await navigator.storage.getDirectory();
++    await root.removeEntry('game', { recursive: true }).catch(() => {});
++    const dir = await root.getDirectoryHandle('game', { create: true });
++
++    const index: [string, number][] = [];
++    let bytes = 0, lastPost = 0;
++    for (let i = 0; i < files.length; i++) {
++        const en = files[i]!;
++        const handle = await (await dir.getFileHandle(String(i), { create: true }) as any).createSyncAccessHandle();
++        let at = 0;
++        try {
++            const reader = (await openEntry(file, en)).getReader();
++            for (;;) {
++                const { done, value } = await reader.read();
++                if (done) break;
++                at = writeAll(handle, value, at);
++            }
++            handle.flush();
++        } finally { handle.close(); }
++        if (at !== en.usize) throw new Error(`Corrupt zip entry (size mismatch): ${en.name}`);
++        index.push([en.name.slice(found.prefix.length), at]);
++        bytes += at;
++        const now = Date.now();
++        if (now - lastPost > 150) { lastPost = now; post({ type: 'progress', files: i + 1, totalFiles: files.length, bytes, totalBytes: total }); }
++    }
++    post({ type: 'done', key, files: index });
++}
+diff --git a/src/web/importer.ts b/src/web/importer.ts
+new file mode 100644
+index 0000000..883d99b
+--- /dev/null
++++ b/src/web/importer.ts
+@@ -0,0 +1,130 @@
++import { BASE } from './base.ts';
++import type { GameIndex } from './game-index.ts';
++import { gameIsIntact, removeGame, saveGame } from './store.ts';
++
++const params = new URLSearchParams(location.search);
++
++export async function ensureGame(): Promise<void> {
++    if (params.has('server')) return;
++    if (!('serviceWorker' in navigator) || !navigator.storage?.getDirectory) {
++        throw new Error('This browser cannot run the web port: it needs service workers and the origin private file system (try a current Chrome, Edge, Firefox or Safari over https).');
++    }
++    if (params.has('reset')) await removeGame();
++    await registerWorker();
++    await startFileProvider();
++    if (!(await gameIsIntact())) await importScreen();
++}
++
++async function registerWorker(): Promise<void> {
++    const reg = await navigator.serviceWorker.register(BASE + 'sw.js', { scope: BASE });
++    await reg.update().catch(() => {});
++    const next = reg.installing ?? reg.waiting;
++    if (next && next.state !== 'activated') {
++        await Promise.race([
++            new Promise<void>(res => next.addEventListener('statechange', () => { if (next.state === 'activated') res(); })),
++            new Promise<void>(res => setTimeout(res, 8000)),
++        ]);
++    }
++    await navigator.serviceWorker.ready;
++    if (!navigator.serviceWorker.controller) {
++        await Promise.race([
++            new Promise<void>(res => navigator.serviceWorker.addEventListener('controllerchange', () => res(), { once: true })),
++            new Promise<void>(res => setTimeout(res, 3000)),
++        ]);
++        if (!navigator.serviceWorker.controller) {
++            if (sessionStorage.getItem('omori-sw-reload')) throw new Error('The service worker did not take control of the page. Reload, or try another browser.');
++            sessionStorage.setItem('omori-sw-reload', '1');
++            location.reload();
++            await new Promise(() => {});
++        }
++    }
++    sessionStorage.removeItem('omori-sw-reload');
++}
++
++async function startFileProvider(): Promise<void> {
++    const w = new Worker(BASE + 'file-provider.js');
++    (window as unknown as Record<string, unknown>).__omoriFileProvider = w;
++    await Promise.race([
++        new Promise<void>(res => { w.onmessage = () => res(); }),
++        new Promise<void>(res => setTimeout(res, 3000)),
++    ]);
++}
++
++const gb = (n: number) => (n / 2 ** 30).toFixed(2) + ' GB';
++
++function importScreen(): Promise<void> {
++    return new Promise<void>(() => {
++        document.body.innerHTML = `
++<style>
++  #imp{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#000;color:#eee;font:16px/1.5 system-ui,sans-serif;
++       padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(16px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));overflow:auto}
++  #imp main{max-width:34em;width:100%}
++  #imp h1{font-size:1.4em;margin:0 0 .4em}
++  #imp p{margin:.5em 0;color:#bbb}
++  #imp button,#imp .pick{display:inline-block;margin:.8em 0;padding:.8em 1.2em;font:inherit;font-weight:600;color:#000;background:#fff;border:0;border-radius:8px;cursor:pointer}
++  #imp input[type=text]{width:100%;box-sizing:border-box;padding:.6em;font:inherit;font-family:monospace;background:#111;color:#fff;border:1px solid #555;border-radius:6px}
++  #imp progress{width:100%;height:14px}
++  #imp .err{color:#ff8a8a;white-space:pre-wrap}
++  #imp small{color:#888}
++</style>
++<div id="imp"><main>
++  <h1>OpenOMORI</h1>
++  <p>This runs your own copy of OMORI in the browser. Nothing is uploaded: the game is unpacked into this browser's private storage on your device, and it works only with a copy you own.</p>
++  <p>Choose a .zip of your OMORI folder (the one that contains <code>OMORI.exe</code> and <code>www</code>). It needs a few GB of free space, and unpacking takes a few minutes.</p>
++  <label class="pick" id="pickLabel">Choose OMORI zip<input id="file" type="file" accept=".zip,application/zip,application/x-zip-compressed" hidden></label>
++  <div id="status"></div>
++  <progress id="bar" max="1" value="0" hidden></progress>
++  <p class="err" id="err"></p>
++  <div id="keyBox" hidden>
++    <p>The zip has no <code>Launch_OMORI.bat</code> to read the game's decryption key from. Paste the 32-character key from your own launcher (the hex after <code>--</code> in that file):</p>
++    <input id="key" type="text" maxlength="32" spellcheck="false" autocapitalize="off" autocomplete="off">
++    <button id="keyOk">Continue</button>
++  </div>
++  <small>On iPhone and iPad, add this page to your Home Screen after importing so Safari does not clear its storage.</small>
++</main></div>`;
++        const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
++        const status = $('status'), bar = $<HTMLProgressElement>('bar'), err = $('err'), input = $<HTMLInputElement>('file');
++
++        const finish = async (key: string, files: [string, number][]) => {
++            const g: GameIndex = { version: 1, key, files };
++            await saveGame(g);
++            navigator.serviceWorker.controller?.postMessage({ type: 'game-reload' });
++            location.reload();
++        };
++
++        input.addEventListener('change', () => {
++            const file = input.files?.[0];
++            if (!file) return;
++            err.textContent = '';
++            $('pickLabel').hidden = true;
++            bar.hidden = false;
++            void navigator.storage.persist?.();
++            status.textContent = 'Reading the zip…';
++            const worker = new Worker(BASE + 'import-worker.js');
++            worker.onmessage = async (e: MessageEvent) => {
++                const m = e.data;
++                if (m.type === 'progress') {
++                    bar.value = m.bytes / m.totalBytes;
++                    status.textContent = `Unpacking ${m.files.toLocaleString()} of ${m.totalFiles.toLocaleString()} files (${gb(m.bytes)} of ${gb(m.totalBytes)})`;
++                } else if (m.type === 'error') {
++                    worker.terminate();
++                    bar.hidden = true; status.textContent = '';
++                    err.textContent = m.message;
++                    $('pickLabel').hidden = false; input.value = '';
++                } else if (m.type === 'done') {
++                    worker.terminate();
++                    status.textContent = 'Done.'; bar.value = 1;
++                    if (m.key) return void finish(m.key, m.files);
++                    $('keyBox').hidden = false;
++                    $('keyOk').onclick = () => {
++                        const k = $<HTMLInputElement>('key').value.trim().toLowerCase();
++                        if (!/^[0-9a-f]{32}$/.test(k)) { err.textContent = 'The key is 32 characters, 0-9 and a-f.'; return; }
++                        void finish(k, m.files);
++                    };
++                }
++            };
++            worker.onerror = ev => { err.textContent = 'The importer crashed: ' + ev.message; };
++            worker.postMessage({ file });
++        });
++    });
++}
+diff --git a/src/web/store.ts b/src/web/store.ts
+new file mode 100644
+index 0000000..8cc0f72
+--- /dev/null
++++ b/src/web/store.ts
+@@ -0,0 +1,21 @@
++import { getMeta, setMeta } from './idb.ts';
++import type { GameIndex } from './game-index.ts';
++
++const META = 'webGame';
++export const getGame = () => getMeta<GameIndex>(META);
++export const saveGame = (g: GameIndex) => setMeta(META, g);
++
++export async function gameIsIntact(): Promise<boolean> {
++    const g = await getGame().catch(() => undefined);
++    if (!g?.key || !g.files?.length) return false;
++    try {
++        const dir = await (await navigator.storage.getDirectory()).getDirectoryHandle('game');
++        await dir.getFileHandle('0');
++        return true;
++    } catch { return false; }
++}
++
++export async function removeGame(): Promise<void> {
++    await (await navigator.storage.getDirectory()).removeEntry('game', { recursive: true }).catch(() => {});
++    await setMeta(META, undefined);
++}
+diff --git a/src/web/touch.ts b/src/web/touch.ts
+new file mode 100644
+index 0000000..605711b
+--- /dev/null
++++ b/src/web/touch.ts
+@@ -0,0 +1,322 @@
++type Name = 'up' | 'down' | 'left' | 'right' | 'ok' | 'escape' | 'shift' | 'pagedown';
++type GroupId = 'pad' | 'ok' | 'escape' | 'shift' | 'pagedown';
++
++const g = globalThis as any;
++const STORE_KEY = 'omori-touch-layout-v1';
++const SCALE_MIN = 0.5, SCALE_MAX = 2, SCALE_STEP = 0.1;
++
++interface Placed { x: number; y: number; s: number }
++type Layout = Partial<Record<GroupId, Placed>>;
++
++export function isTouchDevice(): boolean {
++    const coarse = !!matchMedia?.('(pointer: coarse)').matches;
++    const ua = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent || '');
++    const ipadOs = navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1;
++    return (coarse || ua || ipadOs) && (navigator.maxTouchPoints || 0) > 0;
++}
++
++let portrait = false;
++let editing = false;
++const isPortrait = () => isTouchDevice() && innerHeight > innerWidth;
++const set = (name: Name, on: boolean) => { const s = g.Input?._currentState; if (s) s[name] = on; };
++
++function loadLayout(): Layout {
++    try {
++        const raw = JSON.parse(localStorage.getItem(STORE_KEY) ?? '{}');
++        const out: Layout = {};
++        for (const id of ['pad', 'ok', 'escape', 'shift', 'pagedown'] as GroupId[]) {
++            const p = raw?.[id];
++            if (p && [p.x, p.y, p.s].every(v => typeof v === 'number' && isFinite(v))) out[id] = { x: p.x, y: p.y, s: Math.min(SCALE_MAX, Math.max(SCALE_MIN, p.s)) };
++        }
++        return out;
++    } catch { return {}; }
++}
++function saveLayout(l: Layout): void { try { localStorage.setItem(STORE_KEY, JSON.stringify(l)); } catch {  } }
++
++export function installTouchControls(): void {
++    const forced = new URLSearchParams(location.search).has('touch');
++    if (!isTouchDevice() && !forced) return;
++
++    const css = document.createElement('style');
++    css.textContent = `
++#omori-touch{position:fixed;inset:0;z-index:2147483000;pointer-events:none;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
++#omori-touch .grp{position:absolute;transform:translate(-50%,-50%) scale(var(--s,1))}
++#omori-touch .b{box-sizing:border-box;display:flex;align-items:center;justify-content:center;border-radius:50%;
++  background:#ffffff2e;border:2px solid #ffffff80;color:#fff;font:bold calc(var(--u)*.34) system-ui,sans-serif;
++  pointer-events:auto;touch-action:none;-webkit-tap-highlight-color:transparent;width:var(--u);height:var(--u)}
++#omori-touch .b.on{background:#ffffff77}
++#omori-touch .b.small{width:calc(var(--u)*.78);height:calc(var(--u)*.78);font-size:calc(var(--u)*.28)}
++#omori-touch .pad{pointer-events:auto;touch-action:none;width:calc(var(--u)*3);height:calc(var(--u)*3)}
++#omori-touch .pad .b{position:absolute;pointer-events:none}
++#omori-touch.editing{pointer-events:auto}
++#omori-touch.editing .sel{outline:3px dashed #ffd54a;outline-offset:4px}
++#omori-touch.editing .pad{background:#ffffff14;border-radius:12px}
++#omori-edit{position:absolute;left:50%;transform:translateX(-50%);top:calc(env(safe-area-inset-top) + 8px);display:none;flex-direction:column;align-items:center;gap:8px;
++  pointer-events:auto;background:#000c;border:1px solid #fff5;border-radius:10px;padding:8px 10px;color:#fff;font:13px/1.3 system-ui,sans-serif;text-align:center;max-width:90vw}
++#omori-touch.editing #omori-edit{display:flex}
++#omori-edit .row{display:flex;gap:6px;flex-wrap:wrap;justify-content:center}
++#omori-edit button{font:inherit;font-weight:600;color:#fff;background:#2a4f7c;border:1px solid #4a7fb5;border-radius:6px;padding:7px 12px;min-height:36px;-webkit-appearance:none;appearance:none;touch-action:manipulation}
++#omori-edit button.go{background:#2b7a3d;border-color:#58b36d}
++#omori-rotate{position:fixed;inset:0;z-index:2147483001;display:none;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;
++  text-align:center;color:#fff;background:#000;touch-action:none;font:20px/1.4 -apple-system,Helvetica,Arial,sans-serif;user-select:none;-webkit-user-select:none}
++html.omori-portrait #omori-rotate{display:flex}
++html.omori-portrait canvas,html.omori-portrait #omori-touch{visibility:hidden}`;
++    document.head.append(css);
++
++    const root = document.createElement('div');
++    root.id = 'omori-touch';
++
++    interface Group { id: GroupId; el: HTMLElement; half: number; home: (m: Metrics) => [number, number] }
++    interface Metrics { W: number; H: number; L: number; R: number; T: number; B: number; u: number }
++    const groups: Group[] = [];
++    const arrows = {} as Record<'up' | 'down' | 'left' | 'right', HTMLElement>;
++
++    const pad = document.createElement('div');
++    pad.className = 'pad grp';
++    for (const [n, label, pos] of [
++        ['up', '▲', 'left:var(--u);top:0'], ['left', '◀', 'left:0;top:var(--u)'],
++        ['right', '▶', 'left:calc(var(--u)*2);top:var(--u)'], ['down', '▼', 'left:var(--u);top:calc(var(--u)*2)'],
++    ] as const) {
++        const el = document.createElement('div');
++        el.className = 'b'; el.textContent = label; el.style.cssText = pos;
++        pad.append(el); arrows[n] = el;
++    }
++    root.append(pad);
++    groups.push({ id: 'pad', el: pad, half: 1.5, home: m => [m.L + 1.9 * m.u, m.H - m.B - 1.9 * m.u] });
++
++    const round: { name: Name; el: HTMLElement }[] = [];
++    const add = (id: GroupId & Name, label: string, half: number, home: Group['home'], small = false, fs = '') => {
++        const el = document.createElement('div');
++        el.className = 'b grp' + (small ? ' small' : '');
++        el.textContent = label; if (fs) el.style.fontSize = fs;
++        root.append(el); round.push({ name: id, el }); groups.push({ id, el, half, home });
++    };
++    add('ok', 'A', 0.5, m => [m.W - m.R - 0.9 * m.u, m.H - m.B - 1.65 * m.u]);
++    add('escape', 'B', 0.5, m => [m.W - m.R - 2.05 * m.u, m.H - m.B - 0.9 * m.u]);
++    add('shift', 'RUN', 0.5, m => [m.W - m.R - 2.05 * m.u, m.H - m.B - 2.05 * m.u], false, 'calc(var(--u)*.26)');
++    add('pagedown', 'W', 0.39, m => [m.W - m.R - 0.79 * m.u, m.T + 0.64 * m.u], true);
++
++    const gear = document.createElement('div');
++    gear.className = 'b small';
++    gear.textContent = 'E'; gear.setAttribute('aria-label', 'Edit touch layout');
++    gear.style.position = 'absolute';
++    root.append(gear);
++
++    const bar = document.createElement('div');
++    bar.id = 'omori-edit';
++    const hint = document.createElement('div');
++    const row = document.createElement('div'); row.className = 'row';
++    const mk = (label: string, fn: () => void, cls = '') => {
++        const b = document.createElement('button'); b.type = 'button'; b.textContent = label; if (cls) b.className = cls;
++        let armed = -1;
++        b.addEventListener('pointerdown', e => { e.stopPropagation(); armed = e.pointerId; });
++        b.addEventListener('pointerleave', e => { if (armed === e.pointerId) armed = -1; });
++        b.addEventListener('pointercancel', () => { armed = -1; });
++        b.addEventListener('pointerup', e => { e.stopPropagation(); e.preventDefault(); if (armed === e.pointerId) { armed = -1; fn(); } });
++        row.append(b); return b;
++    };
++    bar.append(hint, row);
++    root.append(bar);
++    document.body.append(root);
++
++    let saved = loadLayout();
++    let draft: Layout = {};
++    let selected: GroupId | null = null;
++
++    const probe = document.createElement('div');
++    probe.style.cssText = 'position:fixed;visibility:hidden;pointer-events:none;left:0;top:0;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)';
++    document.body.append(probe);
++
++    const metrics = (): Metrics => {
++        const cs = getComputedStyle(probe);
++        const short = Math.min(innerWidth, innerHeight), long = Math.max(innerWidth, innerHeight);
++        const u = Math.max(40, Math.min(74, short * 0.15, long * 0.1));
++        return { W: innerWidth, H: innerHeight, L: parseFloat(cs.paddingLeft) || 0, R: parseFloat(cs.paddingRight) || 0, T: parseFloat(cs.paddingTop) || 0, B: parseFloat(cs.paddingBottom) || 0, u };
++    };
++    const current = (id: GroupId): Placed | undefined => (editing ? draft[id] : saved[id]);
++    const clampPos = (m: Metrics, cx: number, cy: number, half: number) => {
++        const h = half * m.u;
++        return [Math.min(m.W - m.R - h, Math.max(m.L + h, cx)), Math.min(m.H - m.B - h, Math.max(m.T + h, cy))] as const;
++    };
++    const layout = () => {
++        const m = metrics();
++        root.style.setProperty('--u', m.u + 'px');
++        for (const gr of groups) {
++            const p = current(gr.id);
++            const s = p?.s ?? 1;
++            const [hx, hy] = gr.home(m);
++            const [x, y] = clampPos(m, p ? p.x * m.W : hx, p ? p.y * m.H : hy, gr.half * s);
++            gr.el.style.left = x + 'px'; gr.el.style.top = y + 'px';
++            gr.el.style.setProperty('--s', String(s));
++        }
++        gear.style.left = m.L + 0.4 * m.u + 'px';
++        gear.style.top = m.T + 0.25 * m.u + 'px';
++        for (const gr of groups) gr.el.classList.toggle('sel', editing && gr.id === selected);
++    };
++
++    const owner = new Map<number, 'pad' | 'btn'>();
++    const down = new Map<number, Set<Name>>();
++    const lit = new Set<Name>();
++
++    const padDirs = (x: number, y: number): Set<Name> => {
++        const r = pad.getBoundingClientRect(), dx = x - (r.left + r.width / 2), dy = y - (r.top + r.height / 2);
++        const dist = Math.hypot(dx, dy), out = new Set<Name>();
++        if (dist < r.width * 0.1) return out;
++        const ax = dx / dist, ay = dy / dist;
++        if (ax < -0.38) out.add('left'); else if (ax > 0.38) out.add('right');
++        if (ay < -0.38) out.add('up'); else if (ay > 0.38) out.add('down');
++        return out;
++    };
++    const buttonAt = (x: number, y: number): Name | null => {
++        let best: Name | null = null, bestD = Infinity;
++        for (const b of round) {
++            const r = b.el.getBoundingClientRect(), d = Math.hypot(x - (r.left + r.width / 2), y - (r.top + r.height / 2));
++            if (d <= (r.width / 2) * 1.25 && d < bestD) { best = b.name; bestD = d; }
++        }
++        return best;
++    };
++    const apply = () => {
++        const want = new Set<Name>();
++        for (const s of down.values()) for (const n of s) want.add(n);
++        for (const n of want) if (!lit.has(n)) set(n, true);
++        for (const n of lit) if (!want.has(n)) set(n, false);
++        lit.clear(); for (const n of want) lit.add(n);
++        for (const [n, el] of Object.entries(arrows)) el.classList.toggle('on', want.has(n as Name));
++        for (const b of round) b.el.classList.toggle('on', want.has(b.name));
++    };
++    const releaseAll = () => { down.clear(); owner.clear(); apply(); };
++    const lockOrientation = () => { try { void (screen.orientation as any)?.lock?.('landscape')?.catch?.(() => {}); } catch {  } };
++
++    let drag: { id: GroupId; pointer: number; dx: number; dy: number } | null = null;
++    const groupAt = (t: EventTarget | null) => groups.find(gr => gr.el === t || gr.el.contains(t as Node));
++    const place = (id: GroupId, cx: number, cy: number, s: number) => { const m = metrics(); draft[id] = { x: cx / m.W, y: cy / m.H, s }; };
++    const centreOf = (gr: Group) => { const r = gr.el.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2] as const; };
++    const freeze = () => {
++        for (const gr of groups) if (!draft[gr.id]) { const [cx, cy] = centreOf(gr); place(gr.id, cx, cy, 1); }
++    };
++    const updateHint = () => {
++        hint.textContent = selected
++            ? 'Drag to move. − / + resize the selected control. Tap empty space to select all.'
++            : 'Drag a control to move it. Tap one, then − / + to resize it (or resize all).';
++    };
++    const resize = (delta: number) => {
++        freeze();
++        for (const gr of groups) {
++            if (selected && gr.id !== selected) continue;
++            const p = draft[gr.id]!; const m = metrics();
++            const s = Math.min(SCALE_MAX, Math.max(SCALE_MIN, Math.round((p.s + delta) * 10) / 10));
++            const [x, y] = clampPos(m, p.x * m.W, p.y * m.H, gr.half * s);
++            draft[gr.id] = { x: x / m.W, y: y / m.H, s };
++        }
++        layout();
++    };
++    const openEditor = () => {
++        if (editing || portrait) return;
++        releaseAll();
++        editing = true; selected = null;
++        draft = JSON.parse(JSON.stringify(saved));
++        root.classList.add('editing');
++        updateHint(); layout();
++    };
++    const closeEditor = (keep: boolean) => {
++        if (!editing) return;
++        if (keep) { freeze(); saved = draft; saveLayout(saved); }
++        editing = false; drag = null; selected = null; draft = {};
++        root.classList.remove('editing');
++        layout();
++    };
++    mk('−', () => resize(-SCALE_STEP));
++    mk('+', () => resize(SCALE_STEP));
++    mk('RESET', () => { draft = {}; layout(); });
++    mk('CANCEL', () => closeEditor(false));
++    mk('DONE', () => closeEditor(true), 'go');
++
++    gear.addEventListener('pointerdown', e => { e.stopPropagation(); });
++    gear.addEventListener('pointerup', e => { e.stopPropagation(); e.preventDefault(); openEditor(); });
++
++    root.addEventListener('pointerdown', (e: PointerEvent) => {
++        if (portrait) return;
++        const t = e.target as HTMLElement;
++        if (t === gear) return;
++        e.preventDefault();
++        if (editing) {
++            const gr = groupAt(t);
++            if (!gr) { if (!bar.contains(t)) { selected = null; updateHint(); layout(); } return; }
++            freeze();
++            selected = gr.id; updateHint();
++            const [cx, cy] = centreOf(gr);
++            drag = { id: gr.id, pointer: e.pointerId, dx: e.clientX - cx, dy: e.clientY - cy };
++            try { gr.el.setPointerCapture(e.pointerId); } catch {  }
++            layout();
++            return;
++        }
++        if (pad.contains(t)) {
++            owner.set(e.pointerId, 'pad'); down.set(e.pointerId, padDirs(e.clientX, e.clientY));
++        } else {
++            const n = buttonAt(e.clientX, e.clientY);
++            if (!n) return;
++            owner.set(e.pointerId, 'btn'); down.set(e.pointerId, new Set([n]));
++        }
++        try { t.setPointerCapture(e.pointerId); } catch {  }
++        lockOrientation();
++        apply();
++    });
++    root.addEventListener('pointermove', (e: PointerEvent) => {
++        if (editing) {
++            if (!drag || drag.pointer !== e.pointerId) return;
++            e.preventDefault();
++            const gr = groups.find(x => x.id === drag!.id)!, m = metrics(), s = draft[gr.id]!.s;
++            const [x, y] = clampPos(m, e.clientX - drag.dx, e.clientY - drag.dy, gr.half * s);
++            place(gr.id, x, y, s); layout();
++            return;
++        }
++        const o = owner.get(e.pointerId);
++        if (!o) return;
++        e.preventDefault();
++        if (o === 'pad') down.set(e.pointerId, padDirs(e.clientX, e.clientY));
++        else { const n = buttonAt(e.clientX, e.clientY); down.set(e.pointerId, n ? new Set([n]) : new Set()); }
++        apply();
++    });
++    const up = (e: PointerEvent) => {
++        if (drag && drag.pointer === e.pointerId) { drag = null; return; }
++        if (!owner.has(e.pointerId)) return;
++        e.preventDefault(); owner.delete(e.pointerId); down.delete(e.pointerId); apply();
++    };
++    root.addEventListener('pointerup', up);
++    root.addEventListener('pointercancel', up);
++    root.addEventListener('contextmenu', e => e.preventDefault());
++    for (const t of ['touchstart', 'touchmove', 'touchend', 'touchcancel', 'mousedown', 'mousemove', 'mouseup', 'click', 'wheel'])
++        root.addEventListener(t, e => e.stopPropagation(), { passive: true });
++    document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAll(); });
++
++    const rot = document.createElement('div');
++    rot.id = 'omori-rotate';
++    rot.textContent = 'Please rotate your device';
++    document.body.append(rot);
++    const audio = (muted: boolean) => {
++        try { g.Howler?.mute?.(muted); } catch {  }
++        try { const c = g.WebAudio?._context as AudioContext | undefined; void (muted ? c?.suspend?.() : c?.resume?.()); } catch {  }
++        try { document.querySelectorAll('audio,video').forEach(m => { (m as HTMLMediaElement).muted = muted; }); } catch {  }
++    };
++    const update = () => {
++        layout();
++        const p = isPortrait();
++        if (p === portrait) return;
++        portrait = p;
++        document.documentElement.classList.toggle('omori-portrait', p);
++        if (p) { releaseAll(); closeEditor(false); }
++        audio(p);
++    };
++    addEventListener('resize', update);
++    addEventListener('orientationchange', () => { update(); setTimeout(update, 150); setTimeout(update, 500); });
++    update();
++
++    const hook = setInterval(() => {
++        const SM = g.SceneManager;
++        if (!SM?.updateScene || !SM._scene || !SM._sceneStarted) return;
++        clearInterval(hook);
++        const stock = SM.updateScene;
++        SM.updateScene = function (this: unknown, ...a: unknown[]) { if (!portrait && !editing) return stock.apply(this, a); };
++    }, 100);
++    lockOrientation();
++}
+diff --git a/src/web/zip.test.ts b/src/web/zip.test.ts
+new file mode 100644
+index 0000000..ba5c0f9
+--- /dev/null
++++ b/src/web/zip.test.ts
+@@ -0,0 +1,53 @@
++import { describe, expect, test } from 'bun:test';
++import { zipSync } from 'fflate';
++import { buildLookup } from './game-index.ts';
++import { extractKey, findGameRoot, readCentralDirectory, readEntry } from './zip.ts';
++
++const enc = (s: string) => new TextEncoder().encode(s);
++const KEY = '0123456789abcdef0123456789abcdef';
++
++const sample = () => zipSync({
++    'OMORI/Launch_OMORI.bat': [enc(`start nw.exe . --${KEY}`), { level: 0 }],
++    'OMORI/OMORI.exe': [enc('MZ'), { level: 0 }],
++    'OMORI/www/js/rpg_core.js': [enc('// core '.repeat(200)), { level: 6 }],
++    'OMORI/www/Languages/en/1.HERO': [enc('hello'), { level: 0 }],
++    'OMORI/www/img/pictures/a%b.rpgmvp': [new Uint8Array([1, 2, 3]), { level: 0 }],
++});
++
++describe('zip reader', () => {
++    test('lists entries and reads stored and deflated data', async () => {
++        const file = new Blob([sample()]);
++        const entries = await readCentralDirectory(file);
++        expect(entries.map(e => e.name).sort()).toContain('OMORI/www/js/rpg_core.js');
++        const core = entries.find(e => e.name.endsWith('rpg_core.js'))!;
++        if (typeof DecompressionStream !== 'undefined') expect(new TextDecoder().decode(await readEntry(file, core))).toBe('// core '.repeat(200));
++        const bat = entries.find(e => e.name.endsWith('.bat'))!;
++        expect(extractKey(new TextDecoder().decode(await readEntry(file, bat)))).toBe(KEY);
++    });
++
++    test('finds the game inside a wrapping folder, or www on its own', () => {
++        expect(findGameRoot(['OMORI/www/js/rpg_core.js', 'OMORI/OMORI.exe'])).toEqual({ prefix: 'omori/www/', root: 'omori/' });
++        expect(findGameRoot(['js/rpg_core.js', 'data/System.KEL'])).toEqual({ prefix: '', root: null });
++        expect(findGameRoot(['www/js/rpg_core.js.bak', 'readme.txt'])).toBeNull();
++    });
++
++    test('rejects things that are not zips', async () => {
++        await expect(readCentralDirectory(new Blob([enc('not a zip file at all, just some text here')]))).rejects.toThrow();
++    });
++});
++
++describe('game index', () => {
++    const files: [string, number][] = [['Languages/en/1.HERO', 5], ['js/rpg_core.js', 9], ['img/a%b.rpgmvp', 3]];
++    const lookup = buildLookup(files);
++    test('matches paths case-insensitively', () => {
++        expect(lookup.find('languages/EN/1.hero')).toBe(0);
++        expect(lookup.find('/js/rpg_core.js')).toBe(1);
++        expect(lookup.find('img/a%b.rpgmvp')).toBe(2);
++        expect(lookup.find('nope')).toBeUndefined();
++    });
++    test('lists folders with their real names', () => {
++        expect(lookup.list('')!.sort()).toEqual(['Languages', 'img', 'js']);
++        expect(lookup.list('languages')).toEqual(['en']);
++        expect(lookup.list('js/rpg_core.js')).toBeNull();
++    });
++});
+diff --git a/src/web/zip.ts b/src/web/zip.ts
+new file mode 100644
+index 0000000..26ae38e
+--- /dev/null
++++ b/src/web/zip.ts
+@@ -0,0 +1,86 @@
++
++export interface ZipEntry {
++    name: string;
++    method: number;
++    csize: number;
++    usize: number;
++    offset: number;
++}
++
++const SIG_EOCD = 0x06054b50, SIG_EOCD64 = 0x06064b50, SIG_LOC64 = 0x07064b50, SIG_CEN = 0x02014b50, SIG_LOCAL = 0x04034b50;
++const u16 = (v: DataView, o: number) => v.getUint16(o, true);
++const u32 = (v: DataView, o: number) => v.getUint32(o, true);
++const u64 = (v: DataView, o: number) => Number(v.getBigUint64(o, true));
++const view = (b: ArrayBuffer) => new DataView(b);
++
++export async function readCentralDirectory(file: Blob): Promise<ZipEntry[]> {
++    const size = file.size;
++    if (size < 22) throw new Error('That file is too small to be a zip.');
++    const tailStart = Math.max(0, size - (0xffff + 22));
++    const tail = view(await file.slice(tailStart, size).arrayBuffer());
++    let eocd = -1;
++    for (let i = tail.byteLength - 22; i >= 0; i--) if (u32(tail, i) === SIG_EOCD) { eocd = i; break; }
++    if (eocd < 0) throw new Error('That does not look like a zip file (no end-of-archive record).');
++
++    let count = u16(tail, eocd + 10), cdSize = u32(tail, eocd + 12), cdOffset = u32(tail, eocd + 16);
++    if (count === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) {
++        const loc = eocd - 20;
++        if (loc < 0 || u32(tail, loc) !== SIG_LOC64) throw new Error('Zip64 archive without a Zip64 locator.');
++        const z64 = view(await file.slice(u64(tail, loc + 8), u64(tail, loc + 8) + 56).arrayBuffer());
++        if (u32(z64, 0) !== SIG_EOCD64) throw new Error('Corrupt Zip64 end-of-archive record.');
++        count = u64(z64, 32); cdSize = u64(z64, 40); cdOffset = u64(z64, 48);
++    }
++
++    const buf = await file.slice(cdOffset, cdOffset + cdSize).arrayBuffer();
++    const cd = view(buf), bytes = new Uint8Array(buf), dec = new TextDecoder();
++    const out: ZipEntry[] = [];
++    let o = 0;
++    while (o + 46 <= cd.byteLength && u32(cd, o) === SIG_CEN) {
++        const method = u16(cd, o + 10);
++        let csize = u32(cd, o + 20), usize = u32(cd, o + 24), offset = u32(cd, o + 42);
++        const nlen = u16(cd, o + 28), elen = u16(cd, o + 30), clen = u16(cd, o + 32);
++        const name = dec.decode(bytes.subarray(o + 46, o + 46 + nlen));
++        for (let e = o + 46 + nlen, end = e + elen; e + 4 <= end;) {
++            const id = u16(cd, e), len = u16(cd, e + 2);
++            if (id === 1) {
++                let p = e + 4;
++                if (usize === 0xffffffff) { usize = u64(cd, p); p += 8; }
++                if (csize === 0xffffffff) { csize = u64(cd, p); p += 8; }
++                if (offset === 0xffffffff) { offset = u64(cd, p); p += 8; }
++            }
++            e += 4 + len;
++        }
++        out.push({ name, method, csize, usize, offset });
++        o += 46 + nlen + elen + clen;
++    }
++    if (out.length !== count) throw new Error(`Zip directory is damaged (expected ${count} entries, read ${out.length}).`);
++    return out;
++}
++
++export async function openEntry(file: Blob, e: ZipEntry): Promise<ReadableStream<Uint8Array>> {
++    const head = view(await file.slice(e.offset, e.offset + 30).arrayBuffer());
++    if (head.byteLength < 30 || u32(head, 0) !== SIG_LOCAL) throw new Error(`Corrupt zip entry: ${e.name}`);
++    const start = e.offset + 30 + u16(head, 26) + u16(head, 28);
++    const raw = file.slice(start, start + e.csize).stream() as ReadableStream<Uint8Array>;
++    if (e.method === 0) return raw;
++    if (e.method === 8) return raw.pipeThrough(new DecompressionStream('deflate-raw') as unknown as ReadableWritablePair<Uint8Array, Uint8Array>);
++    throw new Error(`Unsupported compression method ${e.method} for ${e.name}`);
++}
++
++export async function readEntry(file: Blob, e: ZipEntry): Promise<Uint8Array> {
++    return new Uint8Array(await new Response(await openEntry(file, e)).arrayBuffer());
++}
++
++export function findGameRoot(names: string[]): { prefix: string; root: string | null } | null {
++    for (const marker of ['www/js/rpg_core.js', 'js/rpg_core.js']) {
++        for (const n of names) {
++            const l = n.toLowerCase();
++            const i = l.lastIndexOf(marker);
++            if (i < 0 || l.length !== i + marker.length || (i > 0 && l[i - 1] !== '/')) continue;
++            return marker.startsWith('www/') ? { prefix: l.slice(0, i) + 'www/', root: l.slice(0, i) } : { prefix: l.slice(0, i), root: null };
++        }
++    }
++    return null;
++}
++
++export const extractKey = (text: string): string | null => /--([0-9a-f]{32})/i.exec(text)?.[1]?.toLowerCase() ?? null;
+diff --git a/test/mods.ts b/test/mods.ts
+deleted file mode 100644
+index 02d704c..0000000
+--- a/test/mods.ts
++++ /dev/null
+@@ -1,183 +0,0 @@
+-import puppeteer, { type Page } from 'puppeteer-core';
+-import { zipSync, strToU8 } from 'fflate';
+-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+-import { tmpdir } from 'node:os';
+-import { join } from 'node:path';
+-import { ANGLE, CHROME } from './chrome.ts';
+-
+-const PORT = 8098;
+-mkdirSync('test/out', { recursive: true });
+-const work = mkdtempSync(join(tmpdir(), 'omori-mods-'));
+-const emptyMods = mkdtempSync(join(tmpdir(), 'omori-devmods-'));
+-
+-const server = Bun.spawn(['bun', 'run', 'src/server.ts', String(PORT)], { stdout: 'ignore', stderr: 'inherit', env: { ...process.env, OMORI_MODS: emptyMods } });
+-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+-const failures: string[] = [];
+-const check = (ok: boolean, msg: string) => { console.log(ok ? 'ok  ' : 'FAIL', msg); if (!ok) failures.push(msg); };
+-
+-const ICON = new Uint8Array(readFileSync('../OMORI.Build.8879120/www/icon/icon.png'));
+-const PNG = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='), c => c.charCodeAt(0));
+-const zip = (name: string, files: Record<string, Uint8Array | string>) => {
+-    const p = join(work, name + '.zip');
+-    writeFileSync(p, zipSync(Object.fromEntries(Object.entries(files).map(([k, v]) => [k, typeof v === 'string' ? strToU8(v) : v]))));
+-    return p;
+-};
+-const helloDir = 'examples/hello-mod';
+-const rd = (p: string) => readFileSync(join(helloDir, p), 'utf8');
+-const hello = zip('hello-mod', {
+-    'hello-mod/mod.json': rd('mod.json'),
+-    'hello-mod/patches/data/Items.json.patch.json': rd('patches/data/Items.json.patch.json'),
+-    'hello-mod/patches/languages/en/01_cutscenes_neighbors.yml.merge.json': rd('patches/languages/en/01_cutscenes_neighbors.yml.merge.json'),
+-    'hello-mod/scripts/main.js': rd('scripts/main.js'),
+-});
+-const assets = zip('asset-mod', {
+-    'mod.json': JSON.stringify({ id: 'asset-mod', name: 'Asset Mod', version: '1' }),
+-    'files/icon/icon.png': PNG,
+-});
+-const broken = zip('broken-mod', {
+-    'mod.json': JSON.stringify({ id: 'broken-mod', name: 'Broken Mod', version: '1' }),
+-    'scripts/main.js': `OmoriMod.scope().log('about to fail'); null.boom;`,
+-    'patches/data/Items.json.patch.json': JSON.stringify([{ op: 'replace', path: '/99999/name', value: 'x' }]),
+-});
+-const oneloader = zip('ol-mod', {
+-    'mod.json': JSON.stringify({ manifestVersion: 1, id: 'ol-mod', name: 'OneLoader Mod', description: 'v1 manifest', version: '1', files: { data: ['data/Armors.json'] } }),
+-    'data/Armors.json': JSON.stringify(Array.from({ length: 3 }, (_, i) => (i ? { id: i, name: 'ONELOADER ARMOR', description: '', note: '', params: [], traits: [], etypeId: 1, iconIndex: 0, price: 0, atypeId: 0 } : null))),
+-});
+-const invalid = zip('invalid-mod', { 'mod.json': '{ not json' });
+-
+-const SEVENZ = 'C:/Program Files/7-Zip/7z.exe';
+-const makeDir = (root: string, files: Record<string, string>) => {
+-    for (const [k, v] of Object.entries(files)) { mkdirSync(join(root, k, '..'), { recursive: true }); writeFileSync(join(root, k), v); }
+-};
+-const srcA = join(work, 'src-a'), srcB = join(work, 'src-b');
+-makeDir(srcA, { 'seven-mod/mod.json': JSON.stringify({ id: 'seven-mod', name: 'Seven Zip Mod', version: '1' }), 'seven-mod/patches/data/Items.json.patch.json': JSON.stringify([{ op: 'replace', path: '/3/name', value: 'SEVEN ZIP STEAK' }]) });
+-makeDir(srcB, { 'tgz-mod/mod.json': JSON.stringify({ id: 'tgz-mod', name: 'Tarball Mod', version: '1' }), 'tgz-mod/patches/data/Items.json.patch.json': JSON.stringify([{ op: 'replace', path: '/4/name', value: 'TARBALL SNACK' }]) });
+-const have7z = existsSync(SEVENZ);
+-const sevenZ = join(work, 'seven-mod.7z');
+-if (have7z) Bun.spawnSync([SEVENZ, 'a', '-bd', sevenZ, join(srcA, 'seven-mod')]);
+-const tgz = join(work, 'tgz-mod.tar.gz');
+-const tarExe = existsSync('C:/Windows/System32/tar.exe') ? 'C:/Windows/System32/tar.exe' : 'tar';
+-const tarMade = Bun.spawnSync([tarExe, '-czf', tgz, '-C', srcB, 'tgz-mod']);
+-if (tarMade.exitCode !== 0) throw new Error('could not build the tar.gz fixture: ' + tarMade.stderr.toString());
+-const fakeSevenZ = join(work, 'not-really.7z');
+-writeFileSync(fakeSevenZ, 'this is plain text pretending to be a 7z file');
+-
+-const browser = await puppeteer.launch({
+-    executablePath: CHROME, headless: true, defaultViewport: { width: 1280, height: 720 },
+-    args: ['--autoplay-policy=no-user-gesture-required', '--ignore-gpu-blocklist', '--enable-gpu', ANGLE],
+-});
+-
+-async function load(page: Page, query = '') {
+-    await page.goto(`http://127.0.0.1:${PORT}/${query}`, { waitUntil: 'load' });
+-    await page.waitForFunction(() => (globalThis as any).SceneManager?._scene?.constructor?.name === 'Scene_OmoriTitleScreen', { timeout: 120000 });
+-}
+-async function install(page: Page, ...zips: string[]) {
+-    await page.keyboard.press('F8');
+-    const input = await page.waitForSelector('#omm-panel.open input[type=file][multiple]:not([webkitdirectory])');
+-    await input!.uploadFile(...zips);
+-    await page.waitForFunction(() => [...document.querySelectorAll('#omm-toast button')].some(b => b.textContent === 'Try in a new profile'), { timeout: 60000 });
+-}
+-
+-try {
+-    await sleep(500);
+-    const page = await browser.newPage();
+-    const pageErrors: string[] = [];
+-    page.on('pageerror', e => pageErrors.push((e as Error).message));
+-
+-    await load(page);
+-    check(await page.evaluate(() => $dataItems[2].name) === 'COLD STEAK', 'vanilla game: item 2 is COLD STEAK');
+-    await page.evaluate(() => require('fs').writeFileSync('/appdata/OMORI/TEST_SAVE.txt', 'original'));
+-    page.on('dialog', d => d.accept(d.type() === 'prompt' ? 'Try Mods' : undefined));
+-
+-    await install(page, hello, assets, oneloader, broken, invalid, tgz, fakeSevenZ, ...(have7z ? [sevenZ] : []));
+-    const toast = await page.evaluate(() => document.getElementById('omm-toast')!.innerText);
+-    check(/installed|Installed/.test(toast), `toast confirms install ("${toast.replace(/\n/g, ' ').slice(0, 80)}")`);
+-    const panelText = await page.evaluate(() => document.getElementById('omm-panel')!.innerText);
+-    check(/invalid-mod/.test(panelText) && /not valid JSON/.test(panelText), 'a mod with invalid mod.json is rejected with the reason shown');
+-    check(/not-really\.7z: not a recognised archive/.test(panelText), 'a file that only pretends to be a 7z is rejected with a clear message');
+-
+-    check(await page.evaluate(() => $dataItems[2].name) === 'COLD STEAK', 'installing a mod does not change the running original profile');
+-    await Promise.all([
+-        page.waitForNavigation({ waitUntil: 'load', timeout: 20000 }),
+-        page.evaluate(() => ([...document.querySelectorAll('#omm-toast button')].find(b => b.textContent === 'Try in a new profile') as HTMLElement).click()),
+-    ]);
+-    await page.waitForFunction(() => (globalThis as any).SceneManager?._scene?.constructor?.name === 'Scene_OmoriTitleScreen', { timeout: 120000 });
+-    check(await page.evaluate(() => require('fs').readFileSync('/appdata/OMORI/TEST_SAVE.txt', 'utf8')) === 'original', 'new profile started with a copy of the original saves');
+-    check((await page.evaluate(() => document.getElementById('omm-tab')!.textContent))!.includes('Try Mods'), 'tab shows the active profile name');
+-    await page.evaluate(() => require('fs').writeFileSync('/appdata/OMORI/TEST_SAVE.txt', 'modded session'));
+-    const r = await page.evaluate(async () => {
+-        const icon = new Uint8Array(await (await fetch('/icon/icon.png', { cache: 'no-store' })).arrayBuffer());
+-        return {
+-            item: $dataItems[2].name, desc: $dataItems[2].description, armor: (globalThis as any).$dataArmors[1]?.name,
+-            iconLen: icon.length, mods: (globalThis as any).OmoriMod.mods.map((m: any) => `${m.id}:${m.enabled}`),
+-            sw: !!navigator.serviceWorker.controller,
+-        };
+-    });
+-    check(r.item === 'MODDED STEAK' && r.desc === 'Proof that mods work.', `JSON patch applied to encrypted Items data (${r.item})`);
+-    check(r.armor === 'ONELOADER ARMOR', `OneLoader v1 zip: files.data replacement applied (${r.armor})`);
+-    check(r.sw && r.iconLen === PNG.length && r.iconLen !== ICON.length, `service worker serves the replaced icon (${r.iconLen} bytes, vanilla ${ICON.length})`);
+-    check(r.mods.includes('hello-mod:true') && r.mods.includes('broken-mod:true'), `mods registered: ${r.mods.join(', ')}`);
+-    const names = await page.evaluate(() => [3, 4].map(i => $dataItems[i].name));
+-    check(names[1] === 'TARBALL SNACK' && r.mods.includes('tgz-mod:true'), `.tar.gz mod installed and applied, wrapper folder stripped (${names[1]})`);
+-    if (have7z) check(names[0] === 'SEVEN ZIP STEAK' && r.mods.includes('seven-mod:true'), `.7z mod installed and applied, wrapper folder stripped (${names[0]})`);
+-    else console.log('skip .7z check: 7-Zip not installed at', SEVENZ);
+-
+-    const e = await page.evaluate(() => (globalThis as any).OmoriMod && document.getElementById('omm-tab')!.textContent);
+-    check(/⚠/.test(e ?? ''), `error badge shown on the Mods tab ("${e}")`);
+-    check(await page.evaluate(() => SceneManager._scene.constructor.name) === 'Scene_OmoriTitleScreen', 'game still reached the title screen despite the broken mod');
+-    await page.keyboard.press('F8');
+-    await sleep(400);
+-    const txt = await page.evaluate(() => document.getElementById('omm-panel')!.innerText);
+-    check(/broken-mod/.test(txt) && /boom/.test(txt), 'panel attributes the script error to broken-mod');
+-    check(/99999/.test(txt), 'panel reports the failing patch path');
+-    const logPath = 'latest.log';
+-    await sleep(500);
+-    const log = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
+-    check(/broken-mod/.test(log) && /boom/.test(log), 'errors were written to latest.log');
+-
+-    await load(page, '?mods=0');
+-    check(await page.evaluate(() => $dataItems[2].name) === 'COLD STEAK', '?mods=0 starts the vanilla game');
+-    const iconSafe = await page.evaluate(async () => (await (await fetch('/icon/icon.png', { cache: 'no-store' })).arrayBuffer()).byteLength);
+-    check(iconSafe === ICON.length, `?mods=0 also bypasses the service worker (icon ${iconSafe} bytes)`);
+-
+-    await load(page);
+-    await page.keyboard.press('F8');
+-    await page.waitForSelector('#omm-panel select');
+-    await Promise.all([
+-        page.waitForNavigation({ waitUntil: 'load', timeout: 20000 }),
+-        page.select('#omm-panel select', 'default'),
+-    ]);
+-    await page.waitForFunction(() => (globalThis as any).SceneManager?._scene?.constructor?.name === 'Scene_OmoriTitleScreen', { timeout: 120000 });
+-    const back = await page.evaluate(async () => ({
+-        save: require('fs').readFileSync('/appdata/OMORI/TEST_SAVE.txt', 'utf8'), item: $dataItems[2].name,
+-        icon: (await (await fetch('/icon/icon.png', { cache: 'no-store' })).arrayBuffer()).byteLength,
+-    }));
+-    check(back.save === 'original', `original profile's save is untouched by the modded session (${back.save})`);
+-    check(back.item === 'COLD STEAK' && back.icon === ICON.length, 'original profile runs the vanilla game (data and assets)');
+-    await page.keyboard.press('F8');
+-    await sleep(300);
+-    const panel2 = await page.evaluate(() => document.getElementById('omm-panel')!.innerText);
+-    check(/before switching profile/.test(panel2), 'leaving the modded profile created a save backup');
+-
+-    await Promise.all([
+-        page.waitForNavigation({ waitUntil: 'load', timeout: 20000 }),
+-        page.evaluate(() => { const s = document.querySelector('#omm-panel select') as HTMLSelectElement; s.value = [...s.options].find(o => o.text.includes('Try Mods'))!.value; s.dispatchEvent(new Event('change')); }),
+-    ]);
+-    await page.waitForFunction(() => (globalThis as any).SceneManager?._scene?.constructor?.name === 'Scene_OmoriTitleScreen', { timeout: 120000 });
+-    check(await page.evaluate(() => require('fs').readFileSync('/appdata/OMORI/TEST_SAVE.txt', 'utf8')) === 'modded session', 'modded profile kept its own save');
+-    check(await page.evaluate(() => $dataItems[2].name) === 'MODDED STEAK', 'modded profile still has its mods');
+-    await page.keyboard.press('F8');
+-    await sleep(300);
+-    await page.evaluate(() => { for (const b of document.querySelectorAll('#omm-panel .omm-mod')) if (b.textContent!.includes('hello-mod')) ([...b.querySelectorAll('button')].find(x => x.textContent === 'Disable') as HTMLElement).click(); });
+-    await sleep(500);
+-    await load(page);
+-    check(await page.evaluate(() => $dataItems[2].name) === 'COLD STEAK', 'a mod disabled in the profile no longer applies');
+-
+-    check(pageErrors.filter(m => !/boom|null/.test(m)).length === 0, `no unexpected page errors ${JSON.stringify(pageErrors.slice(0, 3))}`);
+-    await page.screenshot({ path: 'test/out/mods-panel.png' });
+-} finally {
+-    await browser.close();
+-    server.kill();
+-}
+-if (failures.length) { console.error(`\n${failures.length} failure(s)`); process.exit(1); }
+-console.log('\nall mod tests passed');
+diff --git a/test/settings.ts b/test/settings.ts
+index f8621c4..7d50be4 100644
+--- a/test/settings.ts
++++ b/test/settings.ts
+@@ -51,6 +51,6 @@ try {
+     check(splashMs > 3000, `baseline: the splash screens play for a while on a fresh boot (${Math.round(splashMs)} ms)`);
+     check(true, `title "Options" opened the new settings panel (boot ${bootMs} ms)`);
+     check(await page.evaluate(() => !(globalThis as any).SceneManager._scene._optionsActive), 'the old option windows were not activated');
+-    check(await page.evaluate(() => [...document.querySelectorAll('#oset nav [data-tab]')].map(b => b.textContent).join()) === 'Gameplay,Display,Audio,Controls,Accessibility,Mods,System', 'all seven tabs are present');
++    check(await page.evaluate(() => [...document.querySelectorAll('#oset nav [data-tab]')].map(b => b.textContent).join()) === 'Gameplay,Display,Audio,Controls,Accessibility,System', 'all six tabs are present');
+     await page.screenshot({ path: 'test/out/settings-general.png' });
+ 
+@@ -136,23 +136,9 @@ try {
+     check(await page.evaluate(() => (globalThis as any).Input.keyMapper[75]) === 'shift', 'a key already used elsewhere moves to the new action (K: Confirm → Run)');
+     await page.screenshot({ path: 'test/out/settings-controls.png' });
+ 
+-    await page.evaluate(() => {
+-        const api = (globalThis as any).OmoriMod.scope('test-mod');
+-        (globalThis as any).__modGot = [];
+-        api.settings.add({ id: 'power', type: 'slider', label: 'Mod power', min: 0, max: 10, default: 5, onChange: (v: number) => (globalThis as any).__modGot.push(v) });
+-    });
+-    await page.evaluate(() => { document.querySelector<HTMLElement>('#oset nav [data-tab=mods]')!.click(); });
+-    await sleep(200);
+-    check(await page.evaluate(() => !!document.querySelector('.row[data-id="test-mod.power"]')), 'a mod-added setting shows on the Mods tab');
+-    await page.evaluate(() => {
+-        const input = document.querySelector<HTMLInputElement>('.row[data-id="test-mod.power"] input')!;
+-        input.value = '8'; input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true }));
+-    });
+-    check(await page.evaluate(() => (globalThis as any).__modGot.at(-1)) === 8, 'the mod\'s onChange callback received the new value');
+-
+     await page.keyboard.press('Escape');
+     await sleep(1200);
+     const saved = await page.evaluate(() => JSON.parse((globalThis as any).StorageManager.load(-1)));
+-    check(saved.omoriWeb?.showFps === true && saved.omoriWeb?.['mod.test-mod.power'] === 8, `port + mod values are saved in the game's config file (${JSON.stringify(saved.omoriWeb)})`);
++    check(saved.omoriWeb?.showFps === true, `port values are saved in the game's config file (${JSON.stringify(saved.omoriWeb)})`);
+     check(saved.textSkip === !before && saved.keyboardInputMap?.[74] === 'ok', 'game values and key bindings are saved in the same file');
+ 
