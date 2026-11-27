@@ -3376,29 +3376,53 @@ new file mode 100644
 index 0000000..a47ba7b
 --- /dev/null
 +++ b/src/client/save-import.ts
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,56 @@
 +import { fs } from './shim/fs.ts';
++
++const SAVE_NAME = /^file(\d+)\.rpgsave$/i;
++let pending: HTMLInputElement | null = null;
++
++/** Where the game itself looks for save `name`, so imported files land exactly where it will read them. */
++function savePath(name: string): string {
++    const id = Number(SAVE_NAME.exec(name)![1]);
++    try {
++        const p = (globalThis as any).StorageManager?.localFilePath?.(id);
++        if (typeof p === 'string' && p) return p;
++    } catch { /* fall back to the default below */ }
++    return `/save/file${id}.rpgsave`;
++}
 +
 +export function installSaveImporter(): void {
 +    const importFiles = () => {
-+        const input = document.createElement('input');
++        pending?.remove();
++        const input = pending = document.createElement('input');
 +        input.type = 'file';
-+        input.accept = '.rpgsave,application/octet-stream';
-+        input.multiple = true;
++        input.multiple = true; // no `accept`: mobile pickers grey out unknown extensions like .rpgsave; names are checked below
++        // Attached to the page so mobile browsers keep it (and its change event) alive until a file is chosen.
++        input.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none';
++        const done = () => { input.remove(); if (pending === input) pending = null; };
++        input.addEventListener('cancel', done);
 +        input.onchange = async () => {
-+            const files = [...(input.files ?? [])];
-+            if (!files.length) return;
-+            if (files.some(f => !/^file\d+\.rpgsave$/i.test(f.name))) {
-+                alert('Choose OMORI save files named file1.rpgsave, file2.rpgsave, and so on.');
-+                return;
-+            }
-+            if (!confirm(`Import ${files.length} save file(s)? Files with matching names will be replaced.`)) return;
 +            try {
-+                fs.mkdirSync('/save');
-+                for (const file of files) fs.writeFileSync(`/save/${file.name}`, new Uint8Array(await file.arrayBuffer()));
-+                alert(`Imported ${files.length} save file(s). Return to the title screen to load them.`);
-+            } catch (e) { alert(`Could not import saves: ${(e as Error).message}`); }
++                const files = [...(input.files ?? [])];
++                if (!files.length) return;
++                if (files.some(f => !SAVE_NAME.test(f.name))) {
++                    alert('Choose OMORI save files named file1.rpgsave, file2.rpgsave, and so on.');
++                    return;
++                }
++                if (!confirm(`Import ${files.length} save file(s)? Files with matching names will be replaced.`)) return;
++                try {
++                    const data = await Promise.all(files.map(async f => [savePath(f.name), new Uint8Array(await f.arrayBuffer())] as const));
++                    for (const [p, bytes] of data) {
++                        const dir = p.slice(0, p.lastIndexOf('/'));
++                        if (dir) fs.mkdirSync(dir);
++                        fs.writeFileSync(p, bytes);
++                    }
++                    alert(`Imported ${files.length} save file(s). Return to the title screen to load them.`);
++                } catch (e) { alert(`Could not import saves: ${(e as Error).message}`); }
++            } finally { done(); }
 +        };
++        document.body.append(input);
 +        input.click();
 +    };
 +    window.addEventListener('keydown', e => {
@@ -3880,7 +3904,7 @@ new file mode 100644
 index 0000000..769af7b
 --- /dev/null
 +++ b/src/web/touch.ts
-@@ -0,0 +1,320 @@
+@@ -0,0 +1,327 @@
 +type Name = 'up' | 'down' | 'left' | 'right' | 'ok' | 'escape' | 'shift' | 'pagedown' | 'tag' | 'import';
 +type GroupId = 'pad' | 'ok' | 'escape' | 'shift' | 'pagedown' | 'tag' | 'import';
 +const g = globalThis as any;
@@ -3971,7 +3995,7 @@ index 0000000..769af7b
 +    add('shift', 'RUN', 0.5, m => [m.W - m.R - 2.05 * m.u, m.H - m.B - 2.05 * m.u], false, 'calc(var(--u)*.26)');
 +    add('pagedown', 'W', 0.39, m => [m.W - m.R - 0.79 * m.u, m.T + 0.64 * m.u], true);
 +    add('tag', 'TAG', 0.39, m => [m.W - m.R - 0.79 * m.u, m.H - m.B - 0.9 * m.u], true, 'calc(var(--u)*.23)');
-+    add('import', 'IMPORT', 0.43, m => [m.L + 0.65 * m.u, m.T + 0.75 * m.u], true, 'calc(var(--u)*.2)');
++    add('import', 'IMPORT', 0.43, m => [m.L + 1.75 * m.u, m.T + 0.64 * m.u], true, 'calc(var(--u)*.2)');
 +    const gear = document.createElement('div');
 +    gear.className = 'b small';
 +    gear.textContent = 'E'; gear.setAttribute('aria-label', 'Edit touch layout');
@@ -4036,6 +4060,7 @@ index 0000000..769af7b
 +        gear.style.top = m.T + 0.25 * m.u + 'px';
 +        for (const gr of groups) gr.el.classList.toggle('sel', editing && gr.id === selected);
 +    };
++    let importPointer = -1; // the file picker needs a user activation, which touch only grants on release
 +    const owner = new Map<number, 'pad' | 'btn'>();
 +    const down = new Map<number, Set<Name>>();
 +    const lit = new Set<Name>();
@@ -4065,7 +4090,7 @@ index 0000000..769af7b
 +        for (const [n, el] of Object.entries(arrows)) el.classList.toggle('on', want.has(n as Name));
 +        for (const b of round) b.el.classList.toggle('on', want.has(b.name));
 +    };
-+    const releaseAll = () => { down.clear(); owner.clear(); apply(); };
++    const releaseAll = () => { importPointer = -1; down.clear(); owner.clear(); apply(); };
 +    const lockOrientation = () => { try { void (screen.orientation as any)?.lock?.('landscape')?.catch?.(() => {}); } catch {  } };
 +    let drag: { id: GroupId; pointer: number; dx: number; dy: number } | null = null;
 +    const groupAt = (t: EventTarget | null) => groups.find(gr => gr.el === t || gr.el.contains(t as Node));
@@ -4135,7 +4160,7 @@ index 0000000..769af7b
 +        } else {
 +            const n = round.find(b => b.el === t || b.el.contains(t))?.name ?? null;
 +            if (!n) return;
-+            if (n === 'import') { window.dispatchEvent(new Event('omori-import-save')); return; }
++            if (n === 'import') { importPointer = e.pointerId; return; }
 +            owner.set(e.pointerId, 'btn'); down.set(e.pointerId, new Set([n]));
 +        }
 +        try { t.setPointerCapture(e.pointerId); } catch {  }
@@ -4161,6 +4186,12 @@ index 0000000..769af7b
 +    });
 +    const up = (e: PointerEvent) => {
 +        e.stopPropagation();
++        if (importPointer === e.pointerId) {
++            importPointer = -1; e.preventDefault();
++            const hit = e.type === 'pointerup' ? document.elementFromPoint(e.clientX, e.clientY) : null;
++            if (hit && round.some(b => b.name === 'import' && (b.el === hit || b.el.contains(hit)))) window.dispatchEvent(new Event('omori-import-save'));
++            return;
++        }
 +        if (drag && drag.pointer === e.pointerId) { drag = null; return; }
 +        if (!owner.has(e.pointerId)) return;
 +        e.preventDefault(); owner.delete(e.pointerId); down.delete(e.pointerId); apply();
